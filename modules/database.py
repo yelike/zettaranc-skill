@@ -3,13 +3,21 @@
 负责 SQLite 数据库的创建、连接和数据表操作
 """
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 from collections.abc import Generator
 from dataclasses import dataclass
 from contextlib import contextmanager
+
+# 避免循环导入：errors 模块需在数据库完全初始化后才可用
+# 这里仅类型检查使用，运行时按需 lazy import
+if TYPE_CHECKING:
+    from modules.core.errors import ErrorCode, ZettarancError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,32 +62,199 @@ DB_PATH = _db_path.resolve()
 
 
 def get_db_path() -> Path:
-    """获取数据库路径（每次调用时动态读取 DB_PATH 环境变量）"""
+    """获取数据库路径（每次调用时动态读取 DB_PATH 环境变量；纯 getter，无 mkdir 副作用）"""
     path_str = os.getenv("DB_PATH", "data/stock_data.db")
     path = Path(path_str)
     if not path.is_absolute():
         path = Path(__file__).parent.parent / path_str
-    path = path.resolve()
+    return path.resolve()
+
+
+def get_db_connection() -> sqlite3.Connection:
+    """获取数据库连接（动态读取 DB_PATH 环境变量；确保父目录存在）"""
+    path = get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 @contextmanager
 def get_connection() -> Generator[sqlite3.Connection, None, None]:
     """获取数据库连接的上下文管理器"""
-    conn = sqlite3.connect(get_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     # 开启 WAL 模式以提升并发和写入性能
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     try:
         yield conn
         conn.commit()
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+        # 窄化：仅捕获 DB / OS / 序列化相关异常，向上抛以保留调用方语义
+        logger.warning("[database] get_connection 事务失败，触发回滚: %s", e)
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def init_tracking_tables(conn: sqlite3.Connection) -> None:
+    """初始化自我改进系统跟踪表（4 张表 + 索引）
+
+    表定义对应 modules/tracking_tables.sql，所有表名以 _self 结尾，
+    与主系统表区分。
+    """
+    cursor = conn.cursor()
+
+    # 1. 跟踪池表：管理跟踪的股票
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tracking_pool_self (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_code TEXT NOT NULL,
+            name TEXT,
+            add_date TEXT NOT NULL,
+            remove_date TEXT,
+            status TEXT DEFAULT 'active',
+            track_reason TEXT,
+            strategy_tags TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(ts_code, add_date)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_pool_self_code
+        ON tracking_pool_self(ts_code)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_pool_self_status
+        ON tracking_pool_self(status)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_pool_self_add_date
+        ON tracking_pool_self(add_date)
+    """)
+
+    # 2. 跟踪记录表：记录每日的行情、指标、信号
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tracking_records_self (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            vol REAL,
+            pct_chg REAL,
+            amount REAL,
+            j_value REAL,
+            k_value REAL,
+            d_value REAL,
+            bbi REAL,
+            macd_dif REAL,
+            macd_dea REAL,
+            macd_hist REAL,
+            rsi_6 REAL,
+            wr_6 REAL,
+            boll_upper REAL,
+            boll_mid REAL,
+            boll_lower REAL,
+            vol_ratio REAL,
+            is_brick_red INTEGER DEFAULT 0,
+            is_brick_green INTEGER DEFAULT 0,
+            brick_count INTEGER DEFAULT 0,
+            is_n_structure INTEGER DEFAULT 0,
+            is_double_gun INTEGER DEFAULT 0,
+            signal_type TEXT,
+            signal_score REAL,
+            signal_reason TEXT,
+            stage TEXT,
+            stage_confidence REAL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(ts_code, trade_date)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_records_self_code
+        ON tracking_records_self(ts_code)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_records_self_date
+        ON tracking_records_self(trade_date)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tracking_records_self_signal
+        ON tracking_records_self(signal_type)
+    """)
+
+    # 3. 月度复盘表：记录每月的复盘结果
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monthly_reviews_self (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_month TEXT NOT NULL,
+            ts_code TEXT NOT NULL,
+            start_price REAL,
+            start_j_value REAL,
+            start_signal TEXT,
+            end_price REAL,
+            end_j_value REAL,
+            end_signal TEXT,
+            monthly_return REAL,
+            max_drawdown REAL,
+            max_gain REAL,
+            buy_signals_count INTEGER,
+            sell_signals_count INTEGER,
+            correct_buy_signals INTEGER,
+            correct_sell_signals INTEGER,
+            review_summary TEXT,
+            lessons_learned TEXT,
+            strategy_adjustments TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(review_month, ts_code)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_monthly_reviews_self_month
+        ON monthly_reviews_self(review_month)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_monthly_reviews_self_code
+        ON monthly_reviews_self(ts_code)
+    """)
+
+    # 4. 策略表现统计表：统计各策略的表现
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_performance_self (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_name TEXT NOT NULL,
+            review_month TEXT NOT NULL,
+            total_signals INTEGER,
+            correct_signals INTEGER,
+            accuracy_rate REAL,
+            avg_return REAL,
+            max_return REAL,
+            min_return REAL,
+            win_rate REAL,
+            avg_drawdown REAL,
+            max_drawdown REAL,
+            sharpe_ratio REAL,
+            strengths TEXT,
+            weaknesses TEXT,
+            adjustments TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(strategy_name, review_month)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_strategy_performance_self_name
+        ON strategy_performance_self(strategy_name)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_strategy_performance_self_month
+        ON strategy_performance_self(review_month)
+    """)
 
 
 def init_database() -> None:
@@ -109,6 +284,12 @@ def init_database() -> None:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_kline_code_date
             ON daily_kline(ts_code, trade_date DESC)
+        """)
+        # 市场环境预计算（precompute_market_contexts）按日期范围做全市场聚合，
+        # 该 covering index 让 GROUP BY 走索引顺序扫描且无需回表
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kline_date_agg
+            ON daily_kline(trade_date, pct_chg, amount)
         """)
 
         # 2. 技术指标缓存表（每日快照）
@@ -415,6 +596,37 @@ def init_database() -> None:
             ON tushare_indicator_cache(ts_code, trade_date DESC)
         """)
 
+        # 11. LLM 响应耗时日志表
+        # 记录每次 LLM 调用的响应时间、股票代码、日期、模型、是否成功
+        # 用于监控 LLM 服务的性能与可用性
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS llm_response_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code TEXT NOT NULL,           -- 股票代码（如 600519.SH）
+                request_date TEXT NOT NULL,      -- 请求日期 yyyy-mm-dd
+                model TEXT NOT NULL,             -- 调用的 LLM 模型名
+                response_time_ms REAL NOT NULL,  -- 响应耗时（毫秒）
+                success INTEGER DEFAULT 1,       -- 1=成功，0=失败
+                error_message TEXT,              -- 失败时的错误信息
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_log_code_date
+            ON llm_response_log(ts_code, request_date DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_log_date
+            ON llm_response_log(request_date DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_log_model
+            ON llm_response_log(model, request_date DESC)
+        """)
+
+        # 12. 自我改进系统跟踪表（tracking_tables.sql）
+        init_tracking_tables(conn)
+
         print(f"数据库初始化完成: {get_db_path()}")
 
         # 删除旧的indicators表（如果存在）
@@ -471,6 +683,26 @@ def update_watchlist_item(ts_code: str, updates: dict[str, Any]) -> bool:
         cursor = conn.cursor()
         cursor.execute(f"UPDATE watchlist SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE ts_code = ?", values)
         return cursor.rowcount > 0
+
+
+def get_all_stock_codes(limit: int | None = None) -> list[str]:
+    """从 stock_basic 取 ts_code 列表，按 ts_code 排序，可选 limit。
+
+    Args:
+        limit: 限制返回数量，默认 None 返回全部
+
+    Returns:
+        ts_code 字符串列表，按 ts_code 升序排列
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        sql = "SELECT ts_code FROM stock_basic ORDER BY ts_code"
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        cursor.execute(sql, params)
+        return [row[0] for row in cursor.fetchall()]
 
 
 # ============== 随堂测试/交易记录操作 ==============
@@ -611,6 +843,192 @@ def drop_all_tables() -> None:
         for table in tables:
             cursor.execute(f"DROP TABLE IF EXISTS {table[0]}")
         print("所有表已删除")
+
+
+# ============== LLM 响应耗时日志 ==============
+
+
+def record_llm_response(
+    ts_code: str,
+    model: str,
+    response_time_ms: float,
+    success: bool = True,
+    error_message: str = "",
+    request_date: str | None = None,
+) -> int:
+    """记录 LLM 调用响应时间。
+
+    Args:
+        ts_code: 股票代码（如 600519.SH）
+        model: 调用的 LLM 模型名
+        response_time_ms: 响应耗时（毫秒）
+        success: 是否调用成功
+        error_message: 失败时的错误信息（成功时可为空）
+        request_date: 请求日期 yyyy-mm-dd；默认使用当天日期
+
+    Returns:
+        插入的记录 ID
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if request_date is None:
+            cursor.execute("SELECT date('now', 'localtime')")
+            request_date = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO llm_response_log (
+                ts_code, request_date, model,
+                response_time_ms, success, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts_code,
+                request_date,
+                model,
+                float(response_time_ms),
+                1 if success else 0,
+                error_message or "",
+            ),
+        )
+        return cursor.lastrowid if cursor.lastrowid is not None else 0
+
+
+def get_llm_response_log(
+    ts_code: str | None = None,
+    request_date: str | None = None,
+    model: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """查询 LLM 响应日志。
+
+    Args:
+        ts_code: 按股票代码过滤
+        request_date: 按请求日期过滤
+        model: 按模型过滤
+        limit: 返回记录数上限
+
+    Returns:
+        日志记录列表，按 created_at 倒序
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        sql = "SELECT * FROM llm_response_log WHERE 1=1"
+        params: list[Any] = []
+
+        if ts_code:
+            sql += " AND ts_code = ?"
+            params.append(ts_code)
+        if request_date:
+            sql += " AND request_date = ?"
+            params.append(request_date)
+        if model:
+            sql += " AND model = ?"
+            params.append(model)
+
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_llm_response_stats(request_date: str | None = None) -> dict:
+    """按日聚合 LLM 响应统计：调用次数、成功率、平均/最大耗时。
+
+    Args:
+        request_date: 按请求日期过滤（默认当天）
+
+    Returns:
+        {
+          "request_date": "...",
+          "total_calls": N,
+          "success_calls": N,
+          "failed_calls": N,
+          "avg_ms": ...,
+          "max_ms": ...,
+          "min_ms": ...,
+        }
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if request_date is None:
+            cursor.execute("SELECT date('now', 'localtime')")
+            request_date = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS total_calls,
+                COALESCE(SUM(success), 0) AS success_calls,
+                COALESCE(AVG(response_time_ms), 0) AS avg_ms,
+                COALESCE(MAX(response_time_ms), 0) AS max_ms,
+                COALESCE(MIN(response_time_ms), 0) AS min_ms
+            FROM llm_response_log
+            WHERE request_date = ?
+            """,
+            (request_date,),
+        )
+        row = cursor.fetchone()
+        total = int(row["total_calls"] or 0)
+        success = int(row["success_calls"] or 0)
+        return {
+            "request_date": request_date,
+            "total_calls": total,
+            "success_calls": success,
+            "failed_calls": total - success,
+            "avg_ms": float(row["avg_ms"] or 0),
+            "max_ms": float(row["max_ms"] or 0),
+            "min_ms": float(row["min_ms"] or 0),
+        }
+
+
+def save_klines(klines: list[dict[str, Any]]) -> int:
+    """批量保存 K 线数据到 daily_kline 表
+
+    Args:
+        klines: K 线数据列表，每个元素是 dict，包含 ts_code, trade_date, open, high, low, close, vol, amount, pct_chg 等字段
+
+    Returns:
+        保存的记录数
+    """
+    if not klines:
+        return 0
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        saved = 0
+        for kline in klines:
+            try:
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO daily_kline
+                    (ts_code, trade_date, open, high, low, close, vol, amount, pct_chg)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        kline.get("ts_code"),
+                        kline.get("trade_date"),
+                        kline.get("open"),
+                        kline.get("high"),
+                        kline.get("low"),
+                        kline.get("close"),
+                        kline.get("vol"),
+                        kline.get("amount"),
+                        kline.get("pct_chg"),
+                    ),
+                )
+                saved += 1
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
+                # 窄化：仅捕获 DB / OS / 序列化相关异常，单条失败不阻塞批量
+                logger.warning(
+                    "[database] 保存 K 线失败 %s %s: %s",
+                    kline.get("ts_code"),
+                    kline.get("trade_date"),
+                    e,
+                )
+                continue
+        conn.commit()
+    return saved
 
 
 if __name__ == "__main__":

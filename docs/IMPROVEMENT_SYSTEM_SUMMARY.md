@@ -74,12 +74,6 @@
 - 记录 Harness 层更新日志
 - 记录优化日志
 
-##### log_analyzer.py（日志分析模块）
-- 分析信号分布
-- 分析信号准确率
-- 分析改进趋势
-- 生成优化报告
-
 #### 2.3 CLI 命令实现
 ```bash
 # 跟踪池管理
@@ -204,7 +198,6 @@ zt track stats
 - `modules/review_generator.py` - 复盘报告生成模块
 - `modules/harness_updater.py` - Harness 层更新模块
 - `modules/improvement_logger.py` - 日志记录模块
-- `modules/log_analyzer.py` - 日志分析模块
 - `modules/tracking_tables.sql` - 数据库表定义
 - `tests/test_tracking_system.py` - 测试用例
 

@@ -4,6 +4,7 @@
 """
 
 import logging
+import sqlite3
 from typing import Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,15 +70,17 @@ def scan_watchlist(tags: str | None = None) -> dict[str, Any]:
         # 指标分析
         try:
             ind = analyze_stock(ts_code, days=60)
-        except Exception as e:
-            logger.warning(f"指标分析失败 {ts_code}: {e}")
+        except (ValueError, KeyError, TypeError, sqlite3.Error, OSError, AttributeError) as e:
+            # 窄化：仅捕获 DB / OS / 数据解析异常，单只失败不阻塞整批扫描
+            logger.warning("[watchlist] 指标分析失败 %s: %s", ts_code, e)
             continue
 
         # 战法信号
         try:
             signals = detect_all_strategies(ts_code, days=60)
-        except Exception as e:
-            logger.warning(f"战法信号检测失败 {ts_code}: {e}")
+        except (ValueError, KeyError, TypeError, sqlite3.Error, OSError, AttributeError) as e:
+            # 窄化：仅捕获 DB / OS / 数据解析异常，回退为空信号列表
+            logger.warning("[watchlist] 战法信号检测失败 %s: %s", ts_code, e)
             signals = []
 
         # 1. B1/B2 信号提醒
@@ -203,7 +206,7 @@ def generate_daily_report(tags: str | None = None) -> str:
 # ==================== 命令行工具 ====================
 
 
-def main():
+def main() -> None:
     """命令行入口"""
     import argparse
 

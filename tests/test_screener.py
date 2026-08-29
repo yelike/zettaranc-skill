@@ -2,20 +2,24 @@
 screener.py 选股测试
 """
 
+from modules.indicators import calculate_ma
 from modules.screener import (
-    StockScore,
-    MarketStatus,
-    calculate_ma,
-    calculate_vol_ma,
-    calculate_kdj,
+    analyze_stock,
     calculate_bbi,
+    calculate_kdj,
+    calculate_vol_ma,
+    format_stock_score,
+    get_all_stocks,
+    get_recent_klines,
     is_perfect_pattern,
     score_b1_opportunity,
+    score_risk,
     score_trend,
     score_volume_pattern,
-    score_risk,
+    screen_stocks,
 )
-from tests.conftest import generate_uptrend_klines, generate_downtrend_klines
+from modules.screener.models import MarketStatus, StockScore
+from tests.conftest import generate_downtrend_klines, generate_uptrend_klines
 
 
 class TestStockScore:
@@ -144,3 +148,89 @@ class TestScoreRisk:
         score, warnings = score_risk(klines)
         assert score == 50
         assert "数据不足" in warnings
+
+
+class TestScreenerShim:
+    """验证 modules.screener shim 仍导出公共 API"""
+
+    def test_shim_exports_public_api(self):
+        import modules.screener as shim
+
+        public_names = [
+            "StockScore",
+            "MarketStatus",
+            "get_all_stocks",
+            "get_recent_klines",
+            "analyze_stock",
+            "screen_stocks",
+            "format_stock_score",
+            "daily_workflow",
+            "is_perfect_pattern",
+            "score_b1_opportunity",
+            "score_trend",
+            "score_volume_pattern",
+            "score_risk",
+            "calculate_kdj",
+            "calculate_bbi",
+            "calculate_vol_ma",
+        ]
+        for name in public_names:
+            assert hasattr(shim, name), f"shim 缺少 {name}"
+
+
+class UnpicklableDataSource:
+    """用于验证 screen_stocks 在 datasource 不可 pickle 时回退串行。"""
+
+    @property
+    def name(self):
+        return "unpicklable"
+
+    def health_check(self):
+        return True
+
+    def get_daily(self, ts_code, start_date, end_date):
+        return None
+
+    def get_index_daily(self, ts_code, start_date, end_date):
+        return None
+
+    def get_realtime_quote(self, ts_codes):
+        return None
+
+    def get_moneyflow(self, ts_code, trade_date):
+        return None
+
+    def get_daily_basic(self, ts_code, start_date, end_date):
+        return None
+
+    def get_stk_factor(self, ts_code, start_date, end_date):
+        return None
+
+    def get_stock_basic(self, ts_code=None, name=None):
+        return None
+
+    def get_trade_cal(self, exchange, start_date, end_date):
+        return None
+
+    def get_stock_list(self, exchange=None):
+        return [{"ts_code": f"00000{i}.SZ", "name": f"Stock{i}", "market": "主板"} for i in range(60)]
+
+    def get_kline_dicts(self, ts_code, days=60, start_date=None, end_date=None):
+        return []
+
+    def __reduce__(self):
+        raise TypeError("故意不可 pickle")
+
+
+def test_screen_stocks_falls_back_to_serial_when_datasource_unpicklable(monkeypatch, caplog):
+    """注入不可 pickle 的 datasource 时，screen_stocks 应回退串行并记录 warning。"""
+    from modules.screener import engine
+
+    monkeypatch.setattr(engine, "_PARALLEL_THRESHOLD", 0)
+
+    with caplog.at_level("WARNING"):
+        results = screen_stocks(criteria="b1", datasource=UnpicklableDataSource())
+
+    assert isinstance(results, list)
+    assert "无法被 pickle 序列化" in caplog.text
+    assert "回退到串行模式" in caplog.text

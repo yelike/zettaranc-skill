@@ -125,6 +125,133 @@ class TestInitDatabase:
         init_database()  # 第二次不应失败
 
 
+class TestLLMResponseLog:
+    """LLM 响应耗时日志测试"""
+
+    def test_table_exists(self, temp_db):
+        """llm_response_log 表应被 init_database 创建"""
+        from modules.database import get_connection
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='llm_response_log'
+            """)
+            assert cursor.fetchone() is not None
+
+    def test_indexes_exist(self, temp_db):
+        """三个索引都应存在"""
+        from modules.database import get_connection
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='index' AND tbl_name='llm_response_log'
+            """)
+            indexes = {row[0] for row in cursor.fetchall()}
+            assert "idx_llm_log_code_date" in indexes
+            assert "idx_llm_log_date" in indexes
+            assert "idx_llm_log_model" in indexes
+
+    def test_record_llm_response_success(self, temp_db):
+        """记录一次成功调用"""
+        from modules.database import record_llm_response, get_llm_response_log
+
+        record_llm_response(
+            ts_code="600519.SH",
+            model="MiniMax-M3",
+            response_time_ms=1234.5,
+            success=True,
+            request_date="2026-06-15",
+        )
+        rows = get_llm_response_log(ts_code="600519.SH")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["ts_code"] == "600519.SH"
+        assert row["model"] == "MiniMax-M3"
+        assert row["response_time_ms"] == 1234.5
+        assert row["success"] == 1
+        assert row["error_message"] == ""
+        assert row["request_date"] == "2026-06-15"
+
+    def test_record_llm_response_failure(self, temp_db):
+        """记录一次失败调用"""
+        from modules.database import record_llm_response, get_llm_response_log
+
+        record_llm_response(
+            ts_code="000001.SZ",
+            model="MiniMax-M3",
+            response_time_ms=500.0,
+            success=False,
+            error_message="API timeout",
+            request_date="2026-06-15",
+        )
+        rows = get_llm_response_log(ts_code="000001.SZ")
+        assert len(rows) == 1
+        assert rows[0]["success"] == 0
+        assert rows[0]["error_message"] == "API timeout"
+
+    def test_request_date_defaults_to_today(self, temp_db):
+        """不传 request_date 时应使用当天日期"""
+        from modules.database import record_llm_response, get_llm_response_log, get_connection
+
+        record_llm_response(
+            ts_code="600519.SH",
+            model="MiniMax-M3",
+            response_time_ms=100.0,
+        )
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT date('now', 'localtime')")
+            today = cursor.fetchone()[0]
+        rows = get_llm_response_log(ts_code="600519.SH", request_date=today)
+        assert len(rows) == 1
+
+    def test_get_log_filter_by_model(self, temp_db):
+        """按模型过滤"""
+        from modules.database import record_llm_response, get_llm_response_log
+
+        record_llm_response("600519.SH", "MiniMax-M3", 100.0, request_date="2026-06-15")
+        record_llm_response("600519.SH", "MiniMax-M2", 200.0, request_date="2026-06-15")
+
+        m3_rows = get_llm_response_log(model="MiniMax-M3", request_date="2026-06-15")
+        m2_rows = get_llm_response_log(model="MiniMax-M2", request_date="2026-06-15")
+        assert len(m3_rows) == 1
+        assert len(m2_rows) == 1
+        assert m3_rows[0]["model"] == "MiniMax-M3"
+        assert m2_rows[0]["model"] == "MiniMax-M2"
+
+    def test_stats_aggregation(self, temp_db):
+        """日聚合统计"""
+        from modules.database import record_llm_response, get_llm_response_stats
+
+        record_llm_response("600519.SH", "MiniMax-M3", 100.0, success=True, request_date="2026-06-15")
+        record_llm_response("600519.SH", "MiniMax-M3", 200.0, success=True, request_date="2026-06-15")
+        record_llm_response("600519.SH", "MiniMax-M3", 300.0, success=False, request_date="2026-06-15")
+        # 不同日期不应被聚合进来
+        record_llm_response("600519.SH", "MiniMax-M3", 9999.0, success=True, request_date="2026-06-14")
+
+        stats = get_llm_response_stats(request_date="2026-06-15")
+        assert stats["total_calls"] == 3
+        assert stats["success_calls"] == 2
+        assert stats["failed_calls"] == 1
+        assert stats["avg_ms"] == 200.0  # (100+200+300)/3
+        assert stats["max_ms"] == 300.0
+        assert stats["min_ms"] == 100.0
+
+    def test_stats_empty_day(self, temp_db):
+        """没有数据的天应返回全 0 统计"""
+        from modules.database import get_llm_response_stats
+
+        stats = get_llm_response_stats(request_date="2020-01-01")
+        assert stats["total_calls"] == 0
+        assert stats["success_calls"] == 0
+        assert stats["failed_calls"] == 0
+        assert stats["avg_ms"] == 0.0
+
+
 class TestDropAllTables:
     """删除表测试"""
 

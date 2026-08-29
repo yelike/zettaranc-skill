@@ -5,22 +5,22 @@
 记录所有自我改进的操作和结果
 """
 
-import os
-import sys
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Any
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# 项目根目录（用于解析默认 logs/ 路径）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 
 class ImprovementLogger:
     """自我改进日志记录器"""
 
-    def __init__(self, log_dir: str = None):
+    def __init__(self, log_dir: str | None = None) -> None:
         """
         初始化日志记录器
 
@@ -30,7 +30,7 @@ class ImprovementLogger:
         if log_dir:
             self.log_dir = Path(log_dir)
         else:
-            self.log_dir = project_root / "logs"
+            self.log_dir = PROJECT_ROOT / "logs"
 
         # 创建日志目录
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -70,8 +70,9 @@ class ImprovementLogger:
 
             return True
 
-        except Exception as e:
-            print(f"记录日志失败: {e}")
+        except (OSError, TypeError, ValueError) as e:
+            # 窄化：仅捕获文件 I/O / 序列化异常，记录失败返回 False（best effort）
+            logger.warning("[improvement_logger] 记录日志失败 action=%s: %s", action, e)
             return False
 
     def log_signal_detection(
@@ -137,7 +138,7 @@ class ImprovementLogger:
         Returns:
             是否记录成功
         """
-        accuracy_rate = 0
+        accuracy_rate = 0.0
         if buy_signals > 0:
             accuracy_rate = correct_buy_signals / buy_signals * 100
 
@@ -246,8 +247,9 @@ class ImprovementLogger:
             # 返回最新的日志
             return logs[-limit:]
 
-        except Exception as e:
-            print(f"获取日志失败: {e}")
+        except OSError as e:
+            # 窄化：仅捕获文件 I/O 异常，读取失败返回空列表（best effort）
+            logger.warning("[improvement_logger] 获取日志失败: %s", e)
             return []
 
     def get_logs_by_category(self, category: str, limit: int = 100) -> list:
@@ -276,13 +278,13 @@ class ImprovementLogger:
             logs = self.get_recent_logs(limit=1000)
 
             # 统计各分类数量
-            category_counts = {}
+            category_counts: dict[str, int] = {}
             for log in logs:
                 category = log.get("category", "unknown")
                 category_counts[category] = category_counts.get(category, 0) + 1
 
             # 统计各状态数量
-            status_counts = {}
+            status_counts: dict[str, int] = {}
             for log in logs:
                 status = log.get("status", "unknown")
                 status_counts[status] = status_counts.get(status, 0) + 1
@@ -298,12 +300,13 @@ class ImprovementLogger:
                 "latest_optimization": latest_optimization,
             }
 
-        except Exception as e:
-            print(f"获取改进摘要失败: {e}")
+        except (OSError, KeyError, TypeError, AttributeError) as e:
+            # 窄化：仅捕获文件 I/O / 字段访问异常，统计失败返回空字典（best effort）
+            logger.warning("[improvement_logger] 获取改进摘要失败: %s", e)
             return {}
 
 
-def main():
+def main() -> None:
     """测试函数"""
     logger = ImprovementLogger()
 

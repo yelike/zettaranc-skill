@@ -14,7 +14,7 @@ DATA_MODE=jnb
 
 | 值 | 说明 | 依赖 |
 |---|------|------|
-| `jnb` | 接入 Tushare 真实行情数据 | 必须配置 `TUSHARE_TOKEN` + `TUSHARE_API_URL` |
+| `jnb` | 接入真实行情数据 | 配置 `TUSHARE_TOKEN` + `TUSHARE_API_URL` 数据最全；零配置时默认走 a-stock-data 免费源（v4.1.0 新增） |
 | `websearch` | 纯 LLM 对话模式，不走行情接口 | 无需 Tushare 配置 |
 
 ---
@@ -31,11 +31,11 @@ TUSHARE_VERIFY_TOKEN_URL=
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `TUSHARE_TOKEN` | 是（jnb） | Tushare Pro 的 56 位 Token，在 https://tushare.pro/user/token 获取 |
-| `TUSHARE_API_URL` | 是（jnb） | 中转 API 地址，如 `https://tt.xiaodefa.cn` |
+| `TUSHARE_TOKEN` | 否（jnb 建议） | Tushare Pro 的 56 位 Token，在 https://tushare.pro/user/token 获取 |
+| `TUSHARE_API_URL` | 否（jnb 建议） | 中转 API 地址，如 `https://tt.xiaodefa.cn` |
 | `TUSHARE_VERIFY_TOKEN_URL` | 否 | 实时行情验证地址，一般不需要 |
 
-**注意**：如果 `DATA_MODE` 不是 `jnb`，这些配置可以为空，程序不会报错。
+**注意**：如果 `DATA_MODE` 不是 `jnb`，这些配置可以为空，程序不会报错；jnb 模式下未配置 Token 时会自动回退 a-stock-data 免费数据源（腾讯/百度/东财/通达信，无需 API Key）。
 
 ---
 
@@ -44,14 +44,14 @@ TUSHARE_VERIFY_TOKEN_URL=
 ```ini
 LLM_API_KEY=你的API密钥
 LLM_BASE_URL=https://api.minimaxi.com/v1/chat/completions
-LLM_MODEL=MiniMax-M2.7
+LLM_MODEL=MiniMax-M3
 ```
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `LLM_API_KEY` | **否** | 未配置时，系统只做意图识别+知识库检索，不生成回答 |
 | `LLM_BASE_URL` | 否（有 Key 时填） | OpenAI 兼容格式的 API 地址 |
-| `LLM_MODEL` | 否（有 Key 时填） | 模型名称，默认 `MiniMax-M2.7` |
+| `LLM_MODEL` | 否（有 Key 时填） | 模型名称，默认 `MiniMax-M3` |
 
 **支持的 LLM 提供商**：目前支持 OpenAI 兼容格式的 API（MiniMax、OpenRouter、通义千问等）。
 
@@ -120,7 +120,7 @@ TUSHARE_TOKEN=ba0930...fa15
 TUSHARE_API_URL=https://tt.xiaodefa.cn
 LLM_API_KEY=sk-cp-...ULLC
 LLM_BASE_URL=https://api.minimaxi.com/v1/chat/completions
-LLM_MODEL=MiniMax-M2.7
+LLM_MODEL=MiniMax-M3
 KB_ENABLED=true
 KB_API_URL=http://localhost:8000
 ```

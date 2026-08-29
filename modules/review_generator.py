@@ -5,24 +5,22 @@
 生成月度复盘报告，分析信号准确率、收益统计、策略表现
 """
 
-import os
-import sys
-from pathlib import Path
+import logging
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, Any
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+from modules.core.metrics import compute_drawdown
+from modules.database import get_connection
+from modules.improvement_logger import ImprovementLogger
 
-from modules.database import get_connection  # noqa: E402
-from modules.improvement_logger import ImprovementLogger  # noqa: E402
+logger = logging.getLogger(__name__)
 
 
 class ReviewGenerator:
     """复盘报告生成器"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化复盘报告生成器"""
         self.logger = ImprovementLogger()
 
@@ -89,7 +87,8 @@ class ReviewGenerator:
                 "total_stocks": len(reviews),
             }
 
-        except Exception as e:
+        except (sqlite3.Error, ValueError, KeyError, OSError) as e:
+            logger.warning("生成复盘报告 %s 失败: %s", review_month, e)
             return {"success": False, "message": f"生成复盘报告失败: {str(e)}"}
 
     def _analyze_stock_performance(self, ts_code: str, review_month: str) -> dict[str, Any] | None:
@@ -139,18 +138,13 @@ class ReviewGenerator:
                     monthly_return = (end_price - start_price) / start_price * 100
 
                 # 计算最大回撤和最大涨幅
-                max_drawdown = 0
-                max_gain = 0
-                prices = [r.get("close") for r in records if r.get("close")]
+                max_drawdown = 0.0
+                max_gain = 0.0
+                prices: list[float] = [float(r["close"]) for r in records if r.get("close")]
 
                 if len(prices) >= 2:
-                    peak = prices[0]
-                    for price in prices:
-                        if price > peak:
-                            peak = price
-                        drawdown = (peak - price) / peak * 100
-                        if drawdown > max_drawdown:
-                            max_drawdown = drawdown
+                    max_drawdown, _ = compute_drawdown(prices)
+                    max_drawdown *= 100  # 转为百分比
 
                     trough = prices[0]
                     for price in prices:
@@ -228,8 +222,8 @@ class ReviewGenerator:
                     "strategy_adjustments": strategy_adjustments,
                 }
 
-        except Exception as e:
-            print(f"分析 {ts_code} 失败: {e}")
+        except (sqlite3.Error, KeyError, ValueError, TypeError) as e:
+            logger.warning("分析 %s 失败: %s", ts_code, e)
             return None
 
     def _analyze_strategy_performance(self, review_month: str) -> list[dict[str, Any]]:
@@ -259,9 +253,11 @@ class ReviewGenerator:
                 records = [dict(row) for row in cursor.fetchall()]
 
                 # 按信号类型统计
-                signal_stats = {}
+                signal_stats: dict[str, dict[str, Any]] = {}
                 for record in records:
                     signal_type = record.get("signal_type")
+                    if not signal_type:
+                        continue
                     if signal_type not in signal_stats:
                         signal_stats[signal_type] = {"total": 0, "correct": 0, "scores": []}
 
@@ -293,9 +289,11 @@ class ReviewGenerator:
 
                 return strategy_performance
 
-        except Exception as e:
-            print(f"分析策略表现失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("分析策略表现 %s 失败: %s", review_month, e)
             return []
+
+    # ==================== 文本生成（参数化模板，消除三处同构 if-else） ====================
 
     def _generate_review_summary(
         self,
@@ -309,33 +307,24 @@ class ReviewGenerator:
         correct_sell_signals: int,
     ) -> str:
         """生成复盘总结"""
-        summary_parts = []
+        parts = []
 
-        # 收益总结
         if monthly_return is not None:
-            if monthly_return > 0:
-                summary_parts.append(f"月度收益：+{monthly_return:.2f}%")
-            else:
-                summary_parts.append(f"月度收益：{monthly_return:.2f}%")
+            sign = "+" if monthly_return > 0 else ""
+            parts.append(f"月度收益：{sign}{monthly_return:.2f}%")
 
-        # 风险总结
-        if max_drawdown > 10:
-            summary_parts.append(f"最大回撤：{max_drawdown:.2f}%（较高）")
-        elif max_drawdown > 5:
-            summary_parts.append(f"最大回撤：{max_drawdown:.2f}%（中等）")
-        else:
-            summary_parts.append(f"最大回撤：{max_drawdown:.2f}%（较低）")
+        dd_label = "较高" if max_drawdown > 10 else "中等" if max_drawdown > 5 else "较低"
+        parts.append(f"最大回撤：{max_drawdown:.2f}%（{dd_label}）")
 
-        # 信号总结
         if buy_signals_count > 0:
-            buy_accuracy = correct_buy_signals / buy_signals_count * 100
-            summary_parts.append(f"买入信号：{buy_signals_count}次，准确率{buy_accuracy:.1f}%")
+            acc = correct_buy_signals / buy_signals_count * 100
+            parts.append(f"买入信号：{buy_signals_count}次，准确率{acc:.1f}%")
 
         if sell_signals_count > 0:
-            sell_accuracy = correct_sell_signals / sell_signals_count * 100
-            summary_parts.append(f"卖出信号：{sell_signals_count}次，准确率{sell_accuracy:.1f}%")
+            acc = correct_sell_signals / sell_signals_count * 100
+            parts.append(f"卖出信号：{sell_signals_count}次，准确率{acc:.1f}%")
 
-        return "；".join(summary_parts)
+        return "；".join(parts)
 
     def _generate_lessons_learned(
         self,
@@ -346,30 +335,20 @@ class ReviewGenerator:
         correct_buy_signals: int,
     ) -> str:
         """生成经验教训"""
-        lessons = []
-
-        # 收益教训
-        if monthly_return is not None:
-            if monthly_return < -5:
-                lessons.append("月度亏损较大，需要加强止损纪律")
-            elif monthly_return > 10:
-                lessons.append("月度收益良好，但要注意止盈")
-
-        # 风险教训
-        if max_drawdown > 15:
-            lessons.append("最大回撤过大，需要优化仓位管理")
-
-        # 信号教训
+        # (条件, 输出) 规则表
+        rules: list[tuple[bool, str]] = [
+            (monthly_return is not None and monthly_return < -5, "月度亏损较大，需要加强止损纪律"),
+            (monthly_return is not None and monthly_return > 10, "月度收益良好，但要注意止盈"),
+            (max_drawdown > 15, "最大回撤过大，需要优化仓位管理"),
+        ]
         if buy_signals_count > 0:
-            buy_accuracy = correct_buy_signals / buy_signals_count * 100
-            if buy_accuracy < 50:
-                lessons.append("买入信号准确率低，需要优化买入条件")
-            elif buy_accuracy > 80:
-                lessons.append("买入信号准确率高，策略有效")
+            acc = correct_buy_signals / buy_signals_count * 100
+            rules.append((acc < 50, "买入信号准确率低，需要优化买入条件"))
+            rules.append((acc > 80, "买入信号准确率高，策略有效"))
 
+        lessons = [msg for cond, msg in rules if cond]
         if not lessons:
             lessons.append("表现中规中矩，继续观察")
-
         return "；".join(lessons)
 
     def _generate_adjustment_suggestions(
@@ -381,30 +360,19 @@ class ReviewGenerator:
         correct_buy_signals: int,
     ) -> str:
         """生成策略调整建议"""
-        suggestions = []
-
-        # 收益调整
-        if monthly_return is not None:
-            if monthly_return < -5:
-                suggestions.append("收紧止损条件，降低单笔亏损")
-            elif monthly_return > 10:
-                suggestions.append("考虑增加仓位，扩大收益")
-
-        # 风险调整
-        if max_drawdown > 15:
-            suggestions.append("降低单票仓位，分散风险")
-
-        # 信号调整
+        rules: list[tuple[bool, str]] = [
+            (monthly_return is not None and monthly_return < -5, "收紧止损条件，降低单笔亏损"),
+            (monthly_return is not None and monthly_return > 10, "考虑增加仓位，扩大收益"),
+            (max_drawdown > 15, "降低单票仓位，分散风险"),
+        ]
         if buy_signals_count > 0:
-            buy_accuracy = correct_buy_signals / buy_signals_count * 100
-            if buy_accuracy < 50:
-                suggestions.append("增加买入确认条件，提高信号质量")
-            elif buy_accuracy > 80:
-                suggestions.append("当前买入条件有效，可适当放宽")
+            acc = correct_buy_signals / buy_signals_count * 100
+            rules.append((acc < 50, "增加买入确认条件，提高信号质量"))
+            rules.append((acc > 80, "当前买入条件有效，可适当放宽"))
 
+        suggestions = [msg for cond, msg in rules if cond]
         if not suggestions:
             suggestions.append("当前策略表现稳定，无需调整")
-
         return "；".join(suggestions)
 
     def save_review_to_database(self, review_data: dict[str, Any]) -> bool:
@@ -456,8 +424,8 @@ class ReviewGenerator:
                 conn.commit()
                 return True
 
-        except Exception as e:
-            print(f"保存复盘数据失败: {e}")
+        except sqlite3.Error as e:
+            logger.warning("保存复盘数据失败: %s", e)
             return False
 
     def save_strategy_performance(self, strategy_data: dict[str, Any]) -> bool:
@@ -505,8 +473,8 @@ class ReviewGenerator:
                 conn.commit()
                 return True
 
-        except Exception as e:
-            print(f"保存策略表现失败: {e}")
+        except sqlite3.Error as e:
+            logger.warning("保存策略表现失败: %s", e)
             return False
 
     def get_historical_reviews(self, limit: int = 12) -> list[dict[str, Any]]:
@@ -535,12 +503,12 @@ class ReviewGenerator:
 
                 return [row["review_month"] for row in cursor.fetchall()]
 
-        except Exception as e:
-            print(f"获取历史复盘失败: {e}")
+        except sqlite3.Error as e:
+            logger.warning("获取历史复盘失败: %s", e)
             return []
 
 
-def main():
+def main() -> None:
     """测试函数"""
     generator = ReviewGenerator()
 

@@ -1,108 +1,128 @@
 # TODO
 
 > Zettaranc Skill 待办清单
-> 更新日期：2026-06-07
-> 当前版本：v3.0.0
+> 更新日期：2026-07-23
+> 当前版本：v4.1.0
 > 状态：✅ 已完成 / ⏳ 进行中 / 📋 待规划
 
 ---
 
-## ✅ 已完成（v3.0.0 编排模式）
+## ✅ 历史归档（v1.x–v3.9.0）
 
-### 编排模式与角色扩展
-- [x] 用户问题自动路由到对应模块（股票/投资、人生/职业决策、创业/商业判断）
-- [x] 核心心智模型扩展 +3（人生四圈框架、职业发展四层模型、时代主线判断）
-- [x] 知识文件扩展 +3（life-decision.md、career-development.md、business-judgment.md）
-- [x] 决策启发式扩展 +14 条（人生/职业决策 +10、创业/商业判断 +4）
-- [x] 蒸馏流程执行：采集 499 个语料文件，提取 9 个核心模型，三重验证通过
-- [x] 路由逻辑测试用例 +15 个
+### 基础底座（v1.x–v2.7.x）
+- v1.x — SKILL.md 角色扮演协议初版，投资思维框架蒸馏
+- v2.4.0 — CLI 工具 + 回测框架 + 递推修复
+- v2.5.0 — P0/P1 指标补全 + 工程化补完
+- v2.6.0 — 三波理论 / 麒麟会 / 60+ 技术指标
+- v2.7.0 — 数据层充实 + 测试 + 使用手册
 
----
+### 架构演进（v2.8.x–v3.3.x）
+- v2.8.0 — 意图识别编排层（股票/职业/人生/聊天四意图路由）
+- v2.9.0 — 性能极限优化（向量化 60x / 多线程 / WAL）+ MDC 2.0
+- v2.10.0 — CLI 薄壳化 + 5 CI job + 代码审查
+- v3.0.0 — 编排模式 + 人生/创业决策蒸馏
+- v3.1.0 — P3 指标补完（蜈蚣图/牛绳/量比战法/沙漏 V9）
+- v3.2.0 — P3 指标接入 screener + bridge 数据层整合
+- v3.3.0 — Skill-Schema-V2 合规改造
+- v3.3.1 — SKILL.md 拆分 + 工程清理
+- v3.3.2 — DataSource 协议补完（统一数据源抽象）
 
-## ✅ 已完成（v2.10.0 工程质量）
-
-### CLI 修复与统一入口
-- [x] 修 3 个必修 CLI bug（cmd_screen 字段错位 / cmd_watchlist scan key 不匹配 / 11 种 strategy 中文别名映射）
-- [x] 6 业务脚本薄壳化（3623 → 203 行，-94%）
-- [x] 5 个独立 main() 合并到 zt 统一入口（7 个顶层命令 + 9 个子动作）
-- [x] 6 语料脚本迁 `corpus/`
-
-### CI 与质量护栏
-- [x] 5 个 CI job（test / lint / quality-gate / e2e-realdata / pre-commit）
-- [x] SKILL.md 质量门接 CI（`corpus/quality_check.py --json --strict`）
-- [x] pre-commit 钩子（ruff + mypy + 质量门 + 标准文件检查）
-- [x] 真实数据回归（600519.SH × MACD/KDJ/RSI vs stk_factor）
-- [x] 限流升级 multiprocessing 安全（token bucket + 滑动窗口）
-
-### 测试覆盖
-- [x] 测试从 264 → 367 passed, 10 skipped
-- [x] 新增 5 个测试文件（cli_screen / cli_subparser / data_sync_extensions / rate_limiter / indicators_realdata / quality_check）
-- [x] trade_parser（53）、tushare_client（27）、report（54）三模块从零覆盖
-
-### 代码审查
-- [x] 源码 bug 修复（`_fmt_opt` 缺 `sign` 参数 + `render_assessment` f-string 语法错误）
-- [x] 移除 `zettaranc_voice.py`（-492 行），常量迁移至 `trade_reviewer.py`
-- [x] 死代码清零 + NameError 修复 + 硬编码路径清零
+### 少女/少妇模拟器（v3.4.x–v3.9.0）
+- v3.4.0 — v0.2：A 股真实交易约束（T+1/涨跌停/ST/停牌/成本/滑点/ATR 仓位）
+- v3.5.0 — v0.3：战法共振评分（多战法同屏共振 + 冲突信号降级）
+- v3.6.0 — v0.4：Walk-forward 参数寻优（滚动 IS/OOS + 网格搜索）
+- v3.7.0 — v0.5：组合级 Walk-forward 真切片
+- v3.7.6 — 多指标分组选股池 + 组合回测引擎（B1-only）
+- v3.8.0 — 市场环境自适应择时（最小可用版）
+- v3.8.1 — Indevs Tushare Replay API 数据源接入
+- v3.8.2 — 数据层 DB 优先读取架构改造
+- v3.9.0 — 技术债清理（统一 metrics/枚举/常量/路径，修复架构，1097 tests）
 
 ---
 
-## ✅ 已完成（v2.9.0 性能与架构优化）
+## ✅ v3.10.x 多策略融合（已完成）
 
-### 性能极限优化
-- [x] 指标计算向量化（60x 提速）：Pandas 原生重写 MACD/KDJ/BBI，与通达信精度一致
-- [x] SQLite 写入加速（10x-50x）：`executemany` 批量插入替换 `iterrows` 单行插入
-- [x] 多线程并发拉取：`ThreadPoolExecutor`（5 并发）+ 线程安全限流锁
-- [x] SQLite WAL 模式：解决并发 `Database is locked` 问题
+### v3.10.0 多策略融合引擎 ✅
+- [x] `PortfolioBacktestEngine` 支持多策略并行（B1 + B2 + SB1 + 长安）
+- [x] 策略权重按市场环境动态调整（`regime_strategy_weights`）
+- [x] 回测结果展示各策略贡献度（`StrategyStats` / `strategy_stats`）
 
-### 策略智能升级（MDC 2.0）
-- [x] 多维验证体系：资金流 + 布林带 + DMI 动能加分/权重机制
-- [x] 麒麟阶段背景校验：B1/B2 根据吸筹/拉升/派发阶段动态调整置信度
-- [x] 资金流深度对齐：S1/长安战法校验主力大单净流入/流出比例
-- [x] DMI 趋势过滤：ADX 高位动能竭尽 + DI 趋势金叉验证
+### v3.10.1 动态止损策略 ✅
+- [x] ATR 动态止损（`stop_loss_method="atr_based"`，止损距离 = ATR × multiplier）
+- [x] 移动止损（trailing stop，`trailing_stop_enabled` 开关）
 
-### 架构解耦
-- [x] `strategies.py`（1700 行）→ `strategies/` 包（6 子模块：core/base/compound/kirin/sell/vectorized）
-- [x] 向后兼容：`__init__.py` 保留 API，264 用例 100% 通过
+### v3.10.2 市场环境自适应参数 ✅
+- [x] Walk-forward 自动搜索最优参数组合（81 组合穷举，IS/OOS 60%/40%）
 
----
-
-## ✅ 已完成（v2.8.0 意图识别编排层）
-
-- [x] 意图识别规则引擎（rules/intent_rules.yaml）
-- [x] 四意图路由：stock / career / life / chat
-- [x] 向量知识库适配器（modules/knowledge_retriever.py，Qdrant RAG，默认关闭）
-- [x] LLM 生成层（MiniMax / OpenAI 兼容，可选）
-- [x] Z哥职业决策框架（rules/career_prompt.md）
-- [x] Z哥人生决策框架（rules/life_prompt.md）
-- [x] 交互式聊天界面（modules/intent_chat.py）
-- [x] 配置指南文档（docs/CONFIG_GUIDE.md）
+### v3.10.3 多策略融合验收补齐 ✅
+- [x] 全量 1167 passed / 15 skipped 无回归
 
 ---
 
-## ✅ 已完成（v3.1.0 P3 指标补完）
+## ✅ 当前迭代（已完成）
 
-- [x] **蜈蚣图识别** — `detect_centipede_pattern()` in `modules/indicators/price_patterns.py`
-  - 5 因子评分（长上影/长下影/十字星/量能无规律/价格无趋势），≥60 分判定为蜈蚣图
-- [x] **牛绳理论量化** — `detect_bull_rope()` in `modules/indicators/price_patterns.py`
-  - 基于白线/黄线关系判定：牵牛/牛绳断/金叉/死叉 + 缺口百分比 + 白线趋势
-- [x] **量比战法引擎** — `detect_volume_ratio_strategy()` in `modules/indicators/volume_patterns.py`
-  - 6 种场景判定（攻击日/出货日/单向拉升/正常震荡/弱势日/超级攻击）
-- [x] **沙漏评分 V9** — `calculate_sandglass_score()` in `modules/indicators/price_patterns.py`
-  - 5 因子评分（缩量收敛/枢轴邻近/量能斜率/均线结构/事件风险），≥80 分为完美图形
-
-> 测试：523 passed, 10 skipped（新增 ~156 用例）
-
----
-
-## 📋 待实现
-
-（暂无）
+### v3.10.4 技术债与文档收尾（PATCH）✅
+- [x] 版本号五处统一（pyproject / skill.json / SKILL.md×2 / README badge）
+- [x] `docs/CONTRIBUTING.md` 发布 Checklist
+- [x] `docs/ROADMAP.md` 按代码现状重排
+- [x] `docs/USER_GUIDE.md` 追平 v3.8–v3.10 功能（1045 → 1388 行）
+- [x] 性能优化：`precompute_market_contexts()` ~6.3x + `get_kline_dicts_batch()` ~2.2–2.4x
+- [x] 统一错误码最小版（`modules/core/errors.py` + 试点 + `tests/test_errors.py` 12 用例）
+- [x] 鲁班 P0 复核 + knowledge 索引修正
+- [x] 全量 1179 passed / 15 skipped 无回归
 
 ---
 
-## ⏳ 进行中
+## 📋 待实现（按新路线图排序）
 
-（暂无）
+### v3.11.0 监控告警闭环
+- [ ] 止损/止盈触发告警（`trade_records` 持仓 + 最新价比对）
+- [ ] 市场环境变化告警（regime 切换检测）
+- [ ] 告警频率控制（冷却窗口 + 级别去重）
+- [ ] 邮件推送通道（`notifier.py` 扩 SMTP）
+
+### v3.11.1 数据质量检查
+- [ ] 交易日数据缺失检测
+- [ ] 价格跳变/成交量异常检测
+- [ ] 自动重新拉取修复
+
+### 里程碑 M1 传播产物（与 v3.11.x 并行）
+- [ ] 3 个展示 GIF/截图（analyze / screen / backtest 资金曲线）+ 结果卡片，入 `assets/`
+- [ ] `test-prompts.json`（10 个典型场景）
+- [ ] README 首屏重排（钩子 → 30 秒 websearch 体验 → 截图 → 完整安装）
+
+### v3.12.0 分钟级实时数据
+- [ ] 前置 spike：验证 Tushare 分钟线权限 / Indevs 分钟级能力
+- [ ] `minute_kline` 表 + 1/5/15/30/60 分钟线数据接入
+- [ ] DB 缓存 + 盘中信号检测
+
+### 里程碑 M2 生态上架
+- [ ] ClawHub / skills.sh 上架
+- [ ] 社区入口（issue 模板、联系方式）
+
+### v3.13.0 Web 看板增强（原 v4.0.0，按 semver 重编号）
+- [ ] 策略回测可视化（资金曲线、交易记录）
+- [ ] 持仓管理（当前持仓、历史交易）
+- [ ] 信号实时推送
+- [ ] 自定义策略参数 + 市场环境展示
+
+### v4.0.0 自动化交易接口（MAJOR，需合规）
+- [ ] 券商 API 对接
+- [ ] 风控检查（仓位、资金、黑名单）
+- [ ] 下单前确认 + 交易日志
+
+### v4.2.0 策略市场
+- [ ] 策略上传/分享/评分/排名
+- [ ] 一键导入 + 回测对比
+
+---
+
+## 📋 技术债务（未完成）
+
+- [ ] 类型注解（公开 API 全覆盖，mypy 全量）
+- [ ] 错误处理（其余模块接入统一错误码，v3.10.4 已建骨架）
+- [ ] 依赖升级（Python 3.10 → 3.12，pandas 升级）
+- [ ] CI/CD 自动化部署
 
 ---
 
@@ -110,23 +130,18 @@
 
 | 版本 | 主题 | 状态 |
 |------|------|------|
-| **v2.4.0** | CLI 工具 + 回测框架 + 递推修复 | ✅ 已完成 |
-| **v2.5.0** | P0/P1 指标补全 + 工程化补完 | ✅ 已完成 |
-| **v2.6.0** | P2 核心模块（三波理论/麒麟会） | ✅ 已完成 |
-| **v2.7.0** | 数据层充实 + SAT/UAT 测试 + 使用手册 | ✅ 已完成 |
-| **v2.8.0** | 意图识别编排层 + RAG + 可选 LLM | ✅ 已完成 |
-| **v2.9.0** | 性能极限优化（60x/多线程/WAL）+ MDC 2.0 + 架构解耦 | ✅ 已完成 |
-| **v2.10.0** | CLI 修复 + 脚本薄壳化 + 5 CI job + 501 测试 + 代码审查 | ✅ 已完成 |
-| **v3.0.0** | 编排模式 + 人生/创业蒸馏 + 双维度扩展 | ✅ 已完成 |
-| **v3.1.0** | P3 指标补完（蜈蚣图/牛绳理论/量比战法/沙漏 V9） | ✅ 已完成 |
-| **v4.0.0** | 少妇模拟器完整版（自动择时+选股+买入+卖出闭环回测） | 🎯 长期目标 |
-
----
-
-## 下一迭代候选（v3.2.0 候选）
-
-- CI 观察期 4 个 job 改为 required（lint / quality-gate / e2e-realdata / pre-commit）
-- 真实数据 diff 阈值收紧到 2%
-- SKILL.md 拆分（32K 字 → 6 心智模型独立文件 + 30 启发式索引）
-- 活跃市值 +4%/-2.3% 量化层（需指南针数据源）
-- P3 指标集成到 screener（蜈蚣图作为风险扣分项、沙漏评分作为选股加分项）
+| v3.9.0 | 技术债清理（地基工程） | ✅ 已完成 |
+| v3.10.0 | 多策略融合引擎 | ✅ 已完成 |
+| v3.10.1 | 动态止损策略 | ✅ 已完成 |
+| v3.10.2 | 市场环境自适应参数 | ✅ 已完成 |
+| v3.10.3 | 多策略融合验收补齐 | ✅ 已完成 |
+| v3.10.4 | 技术债与文档收尾 | ✅ 已完成 |
+| v4.1.0 | 免费数据源集成（a-stock-data） | ✅ 已完成 |
+| v3.11.0 | 监控告警闭环 | 📋 待开发 |
+| v3.11.1 | 数据质量检查 | 📋 待开发 |
+| M1 | 传播产物（非版本发布） | 📋 待规划 |
+| v3.12.0 | 分钟级实时数据（先 spike） | 📋 待开发 |
+| M2 | 生态上架（非版本发布） | 📋 待规划 |
+| v3.13.0 | Web 看板增强（原 v4.0.0） | 📋 待开发 |
+| v4.0.0 | 自动化交易接口 | 📋 长期 |
+| v4.2.0 | 策略市场 | 📋 长期 |

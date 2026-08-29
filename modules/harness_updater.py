@@ -5,28 +5,26 @@ Harness 层集成模块
 根据复盘结果自动更新 Guardrails
 """
 
-import os
-import sys
-from pathlib import Path
 from datetime import datetime, timedelta
+import logging
+import sqlite3
 from typing import Optional, Any
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+from modules.database import get_connection
+from modules.improvement_logger import ImprovementLogger
+from modules.core.errors import ErrorCode
 
-from modules.database import get_connection  # noqa: E402
-from modules.improvement_logger import ImprovementLogger  # noqa: E402
+logger = logging.getLogger(__name__)
 
 
 class HarnessUpdater:
     """Harness 层更新器"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化 Harness 更新器"""
         self.logger = ImprovementLogger()
 
-    def analyze_strategy_performance(self, review_month: str = None) -> dict[str, Any]:
+    def analyze_strategy_performance(self, review_month: str | None = None) -> dict[str, Any]:
         """
         分析策略表现
 
@@ -116,7 +114,13 @@ class HarnessUpdater:
 
                 return {"success": True, "review_month": review_month, "strategy_stats": strategy_stats}
 
-        except Exception as e:
+        except (OSError, sqlite3.Error, KeyError, ValueError) as e:
+            # 调用方通过 success 字段感知失败；此处仅记录日志并降级返回
+            logger.exception(
+                "[harness] 分析策略表现失败 (code=%s): %s",
+                ErrorCode.HARNESS_UPDATE_FAILED.value,
+                e,
+            )
             return {"success": False, "message": f"分析策略表现失败: {str(e)}"}
 
     def generate_guardrails_update(self, analysis_result: dict[str, Any]) -> dict[str, Any]:
@@ -174,7 +178,13 @@ class HarnessUpdater:
 
             return {"success": True, "review_month": review_month, "updates": updates, "total_updates": len(updates)}
 
-        except Exception as e:
+        except (KeyError, TypeError, AttributeError, ValueError) as e:
+            # 输入 analysis_result 异常：记录日志并返回失败结构
+            logger.exception(
+                "[harness] 生成 Guardrails 更新建议失败 (code=%s): %s",
+                ErrorCode.HARNESS_UPDATE_FAILED.value,
+                e,
+            )
             return {"success": False, "message": f"生成 Guardrails 更新建议失败: {str(e)}"}
 
     def apply_guardrails_updates(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -211,10 +221,16 @@ class HarnessUpdater:
                 "message": f"生成了 {applied_count} 条 Guardrails 更新建议，请人工审核后应用",
             }
 
-        except Exception as e:
+        except (OSError, KeyError, TypeError, ValueError) as e:
+            # 日志写入 / 输出异常：记录日志并返回失败结构
+            logger.exception(
+                "[harness] 应用 Guardrails 更新失败 (code=%s): %s",
+                ErrorCode.HARNESS_UPDATE_FAILED.value,
+                e,
+            )
             return {"success": False, "message": f"应用 Guardrails 更新失败: {str(e)}"}
 
-    def run_harness_update(self, review_month: str = None) -> dict[str, Any]:
+    def run_harness_update(self, review_month: str | None = None) -> dict[str, Any]:
         """
         运行 Harness 更新流程
 
@@ -251,11 +267,17 @@ class HarnessUpdater:
                 "apply": apply_result,
             }
 
-        except Exception as e:
+        except (OSError, KeyError, ValueError) as e:
+            # 顶层编排异常：记录日志并返回失败结构
+            logger.exception(
+                "[harness] Harness 更新失败 (code=%s): %s",
+                ErrorCode.HARNESS_UPDATE_FAILED.value,
+                e,
+            )
             return {"success": False, "message": f"Harness 更新失败: {str(e)}"}
 
 
-def main():
+def main() -> None:
     """测试函数"""
     updater = HarnessUpdater()
 

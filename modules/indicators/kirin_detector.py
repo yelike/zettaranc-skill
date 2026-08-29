@@ -5,9 +5,14 @@
 核心：吸 → 拉 → 派 → 落 四阶段状态机
 """
 
+import logging
+
 from .core import DailyData
 from .price_patterns import calculate_zg_white, calculate_dg_yellow
 from .volume_patterns import detect_chuhuo_wushi
+
+
+logger = logging.getLogger(__name__)
 
 
 def _calculate_ma(values: list[float], period: int) -> float:
@@ -119,7 +124,9 @@ def _is_white_above_yellow(klines: list[DailyData]) -> bool:
         white = calculate_zg_white(klines)
         yellow = calculate_dg_yellow(klines)
         return white > yellow
-    except Exception:
+    except (KeyError, ValueError, AttributeError, TypeError, ArithmeticError) as e:
+        # 计算失败 → 当作"白线不在黄线之上"；调用方已经接受 False 兜底。
+        logger.warning("[kirin_detector] 白黄线对比计算失败: %s", e)
         return False
 
 
@@ -202,8 +209,6 @@ def detect_kirin_stage(klines: list[DailyData]) -> dict:
 
     if len(klines) < 60:
         return result
-
-    klines[-1]
 
     # ========== 计算辅助指标 ==========
     position = _calculate_position_ratio(klines)
@@ -323,7 +328,9 @@ def detect_kirin_stage(klines: list[DailyData]) -> dict:
         chuhuo = detect_chuhuo_wushi(klines)
         if chuhuo.get("total_score", 0) >= 2:
             paifa_score += 30
-    except Exception:
+    except (KeyError, ValueError, AttributeError, TypeError, ArithmeticError) as e:
+        # 五式出货检测失败不影响主派发评分。
+        logger.warning("[kirin_detector] 五式出货检测失败，跳过加分: %s", e)
         pass
 
     # ========== 回落阶段评分 ==========

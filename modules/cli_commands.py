@@ -7,16 +7,24 @@ CLI 扩展命令模块（待集成到 cli.py）
   - trade     : 交易记录的增删查改 + 复盘
   - daily     : 每日五步工作流（观察池 + 选股 + 持仓检查 + 信号汇总 + 报告）
 
-用法示例：
-    python -m modules.cli_commands backtest shaofu 600487.SH --days 250 --json
-    python -m modules.cli_commands trade add "4月25号买了100股茅台，1800块"
-    python -m modules.cli_commands daily --json
+用法示例（canonical CLI 入口为 `modules.cli`，本模块只提供命令实现）：
+    python -m modules.cli backtest shaofu 600487.SH --days 250 --json
+    python -m modules.cli trade add "4月25号买了100股茅台，1800块"
+    python -m modules.cli daily --json
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import sys
 from datetime import datetime
-from typing import Any
+from typing import Any, NoReturn
+
+from modules.core.paths import REPORTS_DIR
+from modules.core.errors import ErrorCode
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== 工具函数 ====================
@@ -27,7 +35,7 @@ def _json_output(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
 
-def _error(msg: str) -> None:
+def _error(msg: str) -> NoReturn:
     """打印错误信息到 stderr 并退出"""
     print(f"错误: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -62,7 +70,7 @@ def _shaofu_result_to_dict(result: Any) -> dict:
                 "exit_date": t.exit_date,
                 "exit_price": t.exit_price,
                 "exit_reason": t.exit_reason,
-                "pnl_pct": round(t.pnl_pct * 100, 2),  # 转为百分比数值
+                "pnl_pct": round(t.pnl_pct, 2),  # pnl_pct 已是百分比数值
                 "holding_days": t.holding_days,
             }
         )
@@ -72,9 +80,9 @@ def _shaofu_result_to_dict(result: Any) -> dict:
         "total_trades": result.total_trades,
         "win_count": result.win_count,
         "win_rate": round(result.win_rate, 3),
-        "avg_pnl": round(result.avg_pnl * 100, 2),
-        "max_win": round(result.max_win * 100, 2),
-        "max_loss": round(result.max_loss * 100, 2),
+        "avg_pnl": round(result.avg_pnl, 2),
+        "max_win": round(result.max_win, 2),
+        "max_loss": round(result.max_loss, 2),
         "profit_factor": round(result.profit_factor, 2),
         "total_return": round(result.total_return * 100, 2),
         "max_drawdown": round(result.max_drawdown * 100, 2),
@@ -100,7 +108,7 @@ def _portfolio_result_to_dict(result: Any) -> dict:
                 "exit_date": t.exit_date,
                 "exit_price": round(t.exit_price, 2) if t.exit_price else None,
                 "exit_reason": t.exit_reason,
-                "pnl_pct": round(t.pnl_pct * 100, 2),
+                "pnl_pct": round(t.pnl_pct, 2),
             }
         )
 
@@ -138,6 +146,74 @@ def _shaofu_portfolio_to_dict(result: dict) -> dict:
     }
 
 
+def _print_shaofu_summary(ts_code: str, dict_result: dict) -> None:
+    """Rust 路径的 shaofu 回测结果 → 人类可读摘要（与 Python summary_text 等价）。"""
+    print(f"\n{'=' * 60}")
+    print(f"回测结果: {ts_code}  [Rust 路径]")
+    print(f"{'=' * 60}")
+    print(f"总交易次数: {dict_result['total_trades']}")
+    print(f"盈利次数:   {dict_result['win_count']}")
+    print(f"胜率:       {dict_result['win_rate']:.1%}")
+    print(f"盈亏比:     {dict_result['profit_factor']:.2f}")
+    print(f"最大回撤:   {dict_result['max_drawdown']:.2f}%")
+    print(f"总收益率:   {dict_result['total_return']:+.2f}%")
+    print(f"夏普比率:   {dict_result['sharpe_ratio']:.2f}")
+    print(f"平均持仓:   {dict_result['avg_holding_days']:.1f}天")
+    print(f"{'=' * 60}")
+    last_trades = dict_result.get("trades", [])[-5:]
+    if last_trades:
+        print("最近5笔交易:")
+        for t in last_trades:
+            status = "[+]" if t.get("pnl_pct", 0) > 0 else "[-]"
+            print(
+                f"  {status} {t.get('entry_date', '?')}→{t.get('exit_date') or '持有中'} "
+                f"{t.get('pnl_pct', 0):+.2f}% ({t.get('exit_reason', '')})"
+            )
+
+
+def _b1_b2_pool_to_dict(pool) -> dict:
+    """将 B1B2PoolResult 转换为可序列化字典。"""
+    return {
+        "ts_count": len(pool.ts_codes),
+        "total_trades": pool.total_trades,
+        "win_rate": round(pool.win_rate, 4),
+        "avg_pnl": round(pool.avg_pnl, 4),
+        "profit_factor": round(pool.profit_factor, 4) if pool.profit_factor else None,
+        "stocks_with_trades": pool.stocks_with_trades,
+        "avg_stock_return": round(pool.avg_stock_return, 4),
+        "median_stock_return": round(pool.median_stock_return, 4),
+        "per_stock": [
+            {
+                "ts_code": r.ts_code,
+                "total_trades": r.total_trades,
+                "win_rate": round(r.win_rate, 4),
+                "total_return": round(r.total_return, 4),
+            }
+            for r in pool.results
+            if r.total_trades > 0
+        ],
+    }
+
+
+def _print_b1_b2_pool_summary(pool) -> None:
+    """人类可读的 B1+B2 池级回测摘要。"""
+    print(f"\n{'=' * 60}")
+    print("B1观察 + B2确认策略 · 池级回测")
+    print(f"{'=' * 60}")
+    print(f"股票数量:       {len(pool.ts_codes)}")
+    print(f"有交易股票数:   {pool.stocks_with_trades}")
+    print(f"总交易次数:     {pool.total_trades}")
+    print(f"胜率:           {pool.win_rate:.1%}")
+    print(f"平均单笔盈亏:   {pool.avg_pnl:+.2f}%")
+    print(f"盈亏比:         {pool.profit_factor:.2f}")
+    print(f"有交易股票平均收益: {pool.avg_stock_return:+.2%}")
+    print(f"有交易股票中位收益: {pool.median_stock_return:+.2%}")
+    print(f"{'=' * 60}")
+    for r in pool.results:
+        if r.total_trades > 0:
+            print(f"  {r.ts_code}: {r.total_trades}笔 胜率{r.win_rate:.0%} 收益{r.total_return:+.2%}")
+
+
 def cmd_backtest(args) -> None:
     """
     回测命令
@@ -146,18 +222,22 @@ def cmd_backtest(args) -> None:
         shaofu   <ts_code>  [--days N] [--json]          少妇战法单股回测
         multi    <ts_code>  [--days N] [--json]          多策略融合回测
         portfolio <c1,c2,..> [--days N] [--json]         组合回测
+        b2-confirm <ts_code>|<codes> [--days N] [--json] B1观察+B2确认次日开盘回测
 
     示例：
         zt backtest shaofu 600487.SH --days 250 --json
         zt backtest multi 600487.SH --strategy b1,b2 --days 120 --json
         zt backtest portfolio 600487.SH,601318.SH --days 120 --json
+        zt backtest b2-confirm 600487.SH --days 500 --json
+        zt backtest b2-confirm 000001.SZ,000002.SZ --days 500 --b2-min-pct 6 --json
+        zt backtest b2-confirm 000001.SZ,000002.SZ --days 800 --walk-forward --folds 4
     """
     sub = getattr(args, "backtest_sub", None)
     use_json = getattr(args, "json", False)
     days = getattr(args, "days", 250)
 
     if not sub:
-        _error("请指定回测子命令: shaofu / multi / portfolio")
+        _error("请指定回测子命令: shaofu / multi / portfolio / b2-confirm")
 
     ts_code = getattr(args, "ts_code", None)
 
@@ -166,19 +246,25 @@ def cmd_backtest(args) -> None:
         if not ts_code:
             _error("请指定股票代码，如: backtest shaofu 600487.SH")
 
-        from .backtest_six_step import backtest_shaofu_single
+        # Rust 路径：bridge 内 silent fallback；ZETTARANC_BACKTEST_IMPL=python 时
+        # compute_func 返回 None 直接走 Python 分支。
+        from modules.backtest._rust_bridge import bridge_shaofu_single
 
-        result = backtest_shaofu_single(ts_code, days=days)
+        dict_result = bridge_shaofu_single(ts_code, days=days)
+        # bridge_shaofu_single 内部：
+        #   - Rust 可用：调 _core_compute.run_single_strategy_backtest_py，
+        #                schema 映射后返回 CLI dict
+        #   - Rust 不可用 / 失败：fallback 到 Python backtest_shaofu_single，
+        #                        返回 _shaofu_result_to_dict(ShaofuBacktestResult)
+        #   - ZETTARANC_BACKTEST_IMPL=python：compute_func 返回 None 直接走 Python
 
-        if result.total_trades == 0:
+        if dict_result.get("total_trades", 0) == 0:
             _warn(f"{ts_code} 在 {days} 天内无交易记录（数据不足或无信号触发）")
-
         if use_json:
-            _json_output(_shaofu_result_to_dict(result))
+            _json_output(dict_result)
         else:
-            from .backtest_six_step import summary_text
-
-            print(summary_text(result))
+            _print_shaofu_summary(ts_code, dict_result)
+        return
 
     # ── multi: 多策略融合回测 ──
     elif sub == "multi":
@@ -189,15 +275,15 @@ def cmd_backtest(args) -> None:
 
         # --strategy 参数暂不传给底层（底层用全部策略融合）
         # 未来可扩展为按策略过滤
-        result = backtest_multi_strategy(ts_code, days=days)
+        result_multi = backtest_multi_strategy(ts_code, days=days)
 
-        if result.total_trades == 0:
+        if result_multi.total_trades == 0:
             _warn(f"{ts_code} 在 {days} 天内无交易记录")
 
         if use_json:
-            _json_output(_portfolio_result_to_dict(result))
+            _json_output(_portfolio_result_to_dict(result_multi))
         else:
-            print(result.summary())
+            print(result_multi.summary())
 
     # ── portfolio: 组合回测 ──
     elif sub == "portfolio":
@@ -209,40 +295,185 @@ def cmd_backtest(args) -> None:
         if not ts_codes:
             _error("股票代码列表为空")
 
-        # 单股票时走少妇单股回测，多股票走少妇组合回测
+        # 单股票时走少妇单股回测（也走 bridge，Rust 优先），多股票走少妇组合回测
         if len(ts_codes) == 1:
-            from .backtest_six_step import backtest_shaofu_single
+            from modules.backtest._rust_bridge import bridge_shaofu_single
 
-            result = backtest_shaofu_single(ts_codes[0], days=days)
+            dict_single = bridge_shaofu_single(ts_codes[0], days=days)
+            if dict_single.get("total_trades", 0) == 0:
+                _warn(f"{ts_codes[0]} 在 {days} 天内无交易记录（数据不足或无信号触发）")
             if use_json:
-                _json_output(_shaofu_result_to_dict(result))
+                _json_output(dict_single)
             else:
-                from .backtest_six_step import summary_text
-
-                print(summary_text(result))
+                _print_shaofu_summary(ts_codes[0], dict_single)
         else:
             from .backtest_six_step import backtest_shaofu_portfolio
 
-            result = backtest_shaofu_portfolio(ts_codes, days=days)
+            result_port = backtest_shaofu_portfolio(ts_codes, days=days)
             if use_json:
-                _json_output(_shaofu_portfolio_to_dict(result))
+                _json_output(_shaofu_portfolio_to_dict(result_port))
             else:
                 print(f"{'=' * 60}")
                 print("少妇战法组合回测结果")
                 print(f"{'=' * 60}")
                 print(f"股票数量:     {len(ts_codes)}")
-                print(f"总交易次数:   {result['total_trades']}")
-                print(f"整体胜率:     {result['overall_win_rate']:.1%}")
-                print(f"累计收益:     {result['total_return']:+.2%}")
-                print(f"最大回撤:     {result['max_drawdown']:.2%}")
-                print(f"夏普比率:     {result['sharpe_ratio']:.2f}")
+                print(f"总交易次数:   {result_port['total_trades']}")
+                print(f"整体胜率:     {result_port['overall_win_rate']:.1%}")
+                print(f"累计收益:     {result_port['total_return']:+.2%}")
+                print(f"最大回撤:     {result_port['max_drawdown']:.2%}")
+                print(f"夏普比率:     {result_port['sharpe_ratio']:.2f}")
                 print(f"{'=' * 60}")
-                for r in result.get("results", []):
+                for r in result_port.get("results", []):
                     status = "有交易" if r.total_trades > 0 else "无交易"
                     print(f"  {r.ts_code}: {status} {r.total_trades}笔 胜率{r.win_rate:.0%} 收益{r.total_return:+.2%}")
 
+    # ── b2-confirm: B1观察+B2确认+次日开盘回测 ──
+    elif sub == "b2-confirm":
+        from modules.strategies.b1_b2_confirm import B1B2Config
+        from modules.backtest.b1_b2_backtest import (
+            run_b1_b2_single,
+            run_b1_b2_pool,
+            run_b1_b2_walkforward,
+        )
+        from modules.loop_engine import LoopConfig
+
+        codes_str = getattr(args, "codes", None)
+        if codes_str:
+            ts_codes = [c.strip() for c in codes_str.split(",") if c.strip()]
+        elif ts_code:
+            ts_codes = [ts_code]
+        else:
+            _error("请指定股票代码，如: backtest b2-confirm 600487.SH 或 b2-confirm 000001.SZ,000002.SZ")
+
+        b2_j_max = getattr(args, "b2_j_max", None)
+        cfg = B1B2Config(
+            b1_j_threshold=getattr(args, "b1_j_threshold", -10.0),
+            observe_min=getattr(args, "observe_min", 3),
+            observe_max=getattr(args, "observe_max", 5),
+            b2_min_pct=getattr(args, "b2_min_pct", 4.0),
+            b2_min_vol_ratio=getattr(args, "b2_min_vol", 2.0),
+            b2_j_max=b2_j_max,
+            max_gap_open_pct=getattr(args, "max_gap_open_pct", 5.0),
+        )
+        lc = LoopConfig(
+            stop_loss_pct=getattr(args, "stop_loss_pct", -0.05),
+            bbi_break_days=getattr(args, "bbi_days", 2),
+            min_holding_days=getattr(args, "min_hold", 2),
+            position_pct=1.0,
+        )
+        active_mv_enabled = getattr(args, "active_mv_gate", False)
+        active_mv_duckdb = getattr(args, "active_mv_duckdb", None)
+        active_mv_path = getattr(args, "active_mv_path", None)
+
+        if getattr(args, "walk_forward", False):
+            wf = run_b1_b2_walkforward(
+                ts_codes,
+                days=days,
+                folds=getattr(args, "folds", 4),
+                window=getattr(args, "window", 120),
+                config=cfg,
+                loop_config=lc,
+                active_mv_enabled=active_mv_enabled,
+                active_mv_duckdb_path=active_mv_duckdb,
+                active_mv_path=active_mv_path,
+            )
+            if use_json:
+                _json_output(wf)
+            else:
+                print(f"\n{'=' * 60}")
+                print("B1观察 + B2确认 · Walk-forward 样本外验证")
+                print(f"{'=' * 60}")
+                for fold in wf.get("folds", []):
+                    pf = fold.get("profit_factor")
+                    print(
+                        f"Fold {fold['fold']}  {fold['range']}  "
+                        f"交易{fold['total_trades']}笔 胜率{fold['win_rate']:.1%} "
+                        f"平均单笔{fold['avg_pnl']:+.2f}% 盈亏比{pf if pf is not None else '-'}"
+                    )
+            return
+
+        if len(ts_codes) == 1:
+            result = run_b1_b2_single(
+                ts_codes[0],
+                days=days,
+                config=cfg,
+                loop_config=lc,
+                active_mv_enabled=active_mv_enabled,
+                active_mv_duckdb_path=active_mv_duckdb,
+                active_mv_path=active_mv_path,
+            )
+            if use_json:
+                _json_output(
+                    {
+                        "ts_code": result.ts_code,
+                        "total_trades": result.total_trades,
+                        "win_rate": round(result.win_rate, 4),
+                        "avg_pnl": round(result.avg_pnl, 4),
+                        "profit_factor": round(result.profit_factor, 4) if result.profit_factor else None,
+                        "total_return": round(result.total_return, 4),
+                        "max_drawdown": round(result.max_drawdown, 4),
+                        "sharpe_ratio": round(result.sharpe_ratio, 4),
+                        "trades": [
+                            {
+                                "entry_date": t.entry_date,
+                                "exit_date": t.exit_date,
+                                "entry_price": round(t.entry_price, 2),
+                                "exit_price": round(t.exit_price, 2),
+                                "pnl_pct": round(t.pnl_pct, 2),
+                                "exit_reason": t.exit_reason,
+                            }
+                            for t in result.trades
+                        ],
+                    }
+                )
+            else:
+                print(f"\n{'=' * 60}")
+                print(f"B1观察+B2确认单股回测: {ts_codes[0]}")
+                print(f"{'=' * 60}")
+                print(f"总交易次数: {result.total_trades}")
+                print(f"胜率:       {result.win_rate:.1%}")
+                print(f"平均单笔:   {result.avg_pnl:+.2f}%")
+                print(f"盈亏比:     {result.profit_factor:.2f}")
+                print(f"总收益率:   {result.total_return:+.2%}")
+                print(f"最大回撤:   {result.max_drawdown:.2%}")
+                print(f"夏普比率:   {result.sharpe_ratio:.2f}")
+        else:
+            pool = run_b1_b2_pool(
+                ts_codes,
+                days=days,
+                config=cfg,
+                loop_config=lc,
+                active_mv_enabled=active_mv_enabled,
+                active_mv_duckdb_path=active_mv_duckdb,
+                active_mv_path=active_mv_path,
+            )
+            if use_json:
+                _json_output(_b1_b2_pool_to_dict(pool))
+            else:
+                _print_b1_b2_pool_summary(pool)
+
     else:
         _error(f"未知回测子命令: {sub}")
+
+
+# ==================== 1.5 market ====================
+
+
+def cmd_market_timing(args) -> None:
+    """市场择时指标命令。"""
+    from modules.market_timing import compute_market_timing, format_market_timing
+
+    result = compute_market_timing(
+        trade_date=getattr(args, "date", None),
+        index_code=getattr(args, "index", "000001.SH"),
+        days=getattr(args, "days", 120),
+        duckdb_path=getattr(args, "duckdb", None),
+    )
+
+    if getattr(args, "json", False):
+        _json_output(result.__dict__)
+    else:
+        print(format_market_timing(result))
 
 
 # ==================== 2. cmd_trade ====================
@@ -433,19 +664,9 @@ def cmd_trade(args) -> None:
 
 
 def cmd_daily(args) -> None:
-    """
-    每日工作流命令
+    """每日五步工作流：观察池扫描 → 选股 → 持仓诊断 → 信号汇总 → 日报
 
-    执行五步闭环：
-        1. 扫描观察池（watchlist scan）
-        2. 全市场选股（screener screen_stocks）
-        3. 检查持仓诊断
-        4. 汇总 B1/S1/S2 信号
-        5. 生成日报
-
-    示例：
-        zt daily
-        zt daily --json
+    拆分为 5 个独立步骤函数，每步独立 try/except，互不阻塞。
     """
     use_json = getattr(args, "json", False)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -459,56 +680,79 @@ def cmd_daily(args) -> None:
         "summary": "",
     }
 
-    # ── Step 1: 扫描观察池 ──
+    watches = _daily_step_watchlist(report)
+    _daily_step_screener(report)
+    _daily_step_portfolio(report, watches)
+    _daily_step_signals(report)
+    _daily_step_summary(report)
+
+    # ── 输出 ──
+    if use_json:
+        _json_output(report)
+    else:
+        _print_daily_report(report, today)
+
+
+def _daily_step_watchlist(report: dict) -> list:
+    """Step 1: 扫描观察池，返回 watchlist 列表供后续步骤使用"""
     try:
         from .watchlist import scan_watchlist, list_watch
 
         watches = list_watch()
-        if watches:
-            scan_result = scan_watchlist()
-            alerts = scan_result.get("alerts", [])
-            summary = scan_result.get("summary", {})
+        if not watches:
+            report["watchlist_scan"] = {"total": 0, "alerts": []}
+            return watches
 
-            watchlist_scan = {
-                "total": summary.get("total", 0),
-                "b1_count": summary.get("b1_count", 0),
-                "b2_count": summary.get("b2_count", 0),
-                "exit_count": summary.get("exit_count", 0),
-                "break_count": summary.get("break_count", 0),
-                "abnormal_count": summary.get("abnormal_count", 0),
-                "alerts": [],
-            }
-            for a in alerts:
-                watchlist_scan["alerts"].append(
+        scan_result = scan_watchlist()
+        alerts = scan_result.get("alerts", [])
+        summary = scan_result.get("summary", {})
+
+        watchlist_scan = {
+            "total": summary.get("total", 0),
+            "b1_count": summary.get("b1_count", 0),
+            "b2_count": summary.get("b2_count", 0),
+            "exit_count": summary.get("exit_count", 0),
+            "break_count": summary.get("break_count", 0),
+            "abnormal_count": summary.get("abnormal_count", 0),
+            "alerts": [
+                {
+                    "ts_code": a.ts_code,
+                    "name": a.name,
+                    "alert_type": a.alert_type,
+                    "level": a.level,
+                    "message": a.message,
+                }
+                for a in alerts
+            ],
+        }
+        report["watchlist_scan"] = watchlist_scan
+
+        for a in alerts:
+            if a.alert_type in ("B1", "B2", "EXIT"):
+                report["signals"].append(
                     {
                         "ts_code": a.ts_code,
                         "name": a.name,
-                        "alert_type": a.alert_type,
-                        "level": a.level,
+                        "signal": a.alert_type,
                         "message": a.message,
+                        "source": "watchlist",
                     }
                 )
-            report["watchlist_scan"] = watchlist_scan
-
-            # 收集观察池中的信号
-            for a in alerts:
-                if a.alert_type in ("B1", "B2", "EXIT"):
-                    report["signals"].append(
-                        {
-                            "ts_code": a.ts_code,
-                            "name": a.name,
-                            "signal": a.alert_type,
-                            "message": a.message,
-                            "source": "watchlist",
-                        }
-                    )
-        else:
-            report["watchlist_scan"] = {"total": 0, "alerts": []}
-    except Exception as e:
+        return watches
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        # 步骤失败不影响整个 daily 流程，继续执行后续步骤
+        logger.warning(
+            "[cli_commands] 观察池扫描失败 (code=%s): %s",
+            ErrorCode.CLI_COMMAND_FAILED.value,
+            e,
+        )
         _warn(f"观察池扫描失败: {e}")
         report["watchlist_scan"] = {"error": str(e)}
+        return []
 
-    # ── Step 2: 全市场选股（B1 策略，取前 20）──
+
+def _daily_step_screener(report: dict) -> None:
+    """Step 2: 全市场 B1 选股，取前 10"""
     try:
         from .screener import screen_stocks
 
@@ -524,7 +768,6 @@ def cmd_daily(args) -> None:
                 "rating": s.rating,
             }
             top_picks.append(pick)
-            # 汇总 B1 信号
             if s.b1_score >= 50:
                 report["signals"].append(
                     {
@@ -536,25 +779,31 @@ def cmd_daily(args) -> None:
                     }
                 )
         report["top_picks"] = top_picks
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        logger.warning(
+            "[cli_commands] 全市场选股失败 (code=%s): %s",
+            ErrorCode.CLI_COMMAND_FAILED.value,
+            e,
+        )
         _warn(f"全市场选股失败: {e}")
         report["top_picks"] = {"error": str(e)}
 
-    # ── Step 3: 持仓检查（观察池中的股票做快速诊断）──
+
+def _daily_step_portfolio(report: dict, watches: list) -> None:
+    """Step 3: 持仓快速诊断（前 5 只）"""
     try:
         from .portfolio_diagnosis import diagnose_stock
 
-        portfolio_status = []
-        # 对观察池中前 5 只做快速诊断
-        check_codes = []
-        if isinstance(report["watchlist_scan"], dict):
-            for a in report["watchlist_scan"].get("alerts", [])[:5]:
+        check_codes: list[str] = []
+        wl = report["watchlist_scan"]
+        if isinstance(wl, dict):
+            for a in wl.get("alerts", [])[:5]:
                 if a["ts_code"] not in check_codes:
                     check_codes.append(a["ts_code"])
-        # 如果观察池没有 alerts，用 list_watch 的股票
         if not check_codes and watches:
             check_codes = [w["ts_code"] for w in watches[:5]]
 
+        portfolio_status = []
         for code in check_codes:
             try:
                 diag = diagnose_stock(code, days=60)
@@ -564,38 +813,47 @@ def cmd_daily(args) -> None:
                         "diagnosis": diag[:200] if isinstance(diag, str) else str(diag)[:200],
                     }
                 )
-            except Exception as e:
-                portfolio_status.append(
-                    {
-                        "ts_code": code,
-                        "error": str(e),
-                    }
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                logger.warning(
+                    "[cli_commands] 单股诊断失败 (ts=%s, code=%s): %s",
+                    code,
+                    ErrorCode.CLI_COMMAND_FAILED.value,
+                    e,
                 )
+                portfolio_status.append({"ts_code": code, "error": str(e)})
         report["portfolio_status"] = portfolio_status
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        logger.warning(
+            "[cli_commands] 持仓检查失败 (code=%s): %s",
+            ErrorCode.CLI_COMMAND_FAILED.value,
+            e,
+        )
         _warn(f"持仓检查失败: {e}")
         report["portfolio_status"] = {"error": str(e)}
 
-    # ── Step 4: 信号已在 Step 1/2 中收集 ──
-    # 去重（按 ts_code + signal）
-    seen = set()
-    unique_signals = []
+
+def _daily_step_signals(report: dict) -> None:
+    """Step 4: 信号去重"""
+    seen: set[tuple] = set()
+    unique: list = []
     for sig in report["signals"]:
         key = (sig["ts_code"], sig["signal"])
         if key not in seen:
             seen.add(key)
-            unique_signals.append(sig)
-    report["signals"] = unique_signals
+            unique.append(sig)
+    report["signals"] = unique
 
-    # ── Step 5: 生成摘要 ──
+
+def _daily_step_summary(report: dict) -> None:
+    """Step 5: 生成摘要文本"""
     wl = report["watchlist_scan"]
-    b1_count = wl.get("b1_count", 0) if isinstance(wl, dict) else 0
-    exit_count = wl.get("exit_count", 0) if isinstance(wl, dict) else 0
+    is_dict = isinstance(wl, dict)
+    b1_count = wl.get("b1_count", 0) if is_dict else 0
+    exit_count = wl.get("exit_count", 0) if is_dict else 0
     picks_count = len(report["top_picks"]) if isinstance(report["top_picks"], list) else 0
     sig_count = len(report["signals"])
 
-    parts = []
-    parts.append(f"今日观察池 {wl.get('total', 0) if isinstance(wl, dict) else 0} 只")
+    parts = [f"今日观察池 {wl.get('total', 0) if is_dict else 0} 只"]
     if b1_count:
         parts.append(f"出现 B1 信号 {b1_count} 只")
     if exit_count:
@@ -609,96 +867,294 @@ def cmd_daily(args) -> None:
 
     report["summary"] = "，".join(parts) + "。"
 
-    # ── 输出 ──
+
+def _print_daily_report(report: dict, today: str) -> None:
+    """格式化打印每日报告"""
+    wl = report["watchlist_scan"]
+    print(f"\n{'=' * 60}")
+    print(f"Z哥每日工作流报告  {today}")
+    print(f"{'=' * 60}")
+    print(f"\n{report['summary']}")
+
+    if isinstance(wl, dict) and wl.get("alerts"):
+        print(f"\n【观察池信号】({wl.get('total', 0)}只)")
+        for a in wl["alerts"][:10]:
+            print(f"  [{a['alert_type']}] {a['ts_code']} {a['name']}: {a['message']}")
+
+    if isinstance(report["top_picks"], list) and report["top_picks"]:
+        print("\n【B1 潜力股 TOP 10】")
+        for i, p in enumerate(report["top_picks"], 1):
+            print(
+                f"  {i:2}. {p['ts_code']} {p['name']:<8} 评分:{p['score']:5.1f}  B1:{p['b1_score']:5.1f}  {p['rating']}"
+            )
+
+    if report["portfolio_status"]:
+        print("\n【持仓诊断】")
+        for p in report["portfolio_status"]:
+            if "error" in p:
+                print(f"  {p['ts_code']}: 诊断失败 - {p['error']}")
+            else:
+                print(f"  {p['ts_code']}: {p['diagnosis']}")
+
+    if report["signals"]:
+        print(f"\n【信号汇总】({len(report['signals'])}条)")
+        for sig in report["signals"]:
+            print(f"  [{sig['signal']}] {sig['ts_code']} {sig['name']}: {sig['message']}")
+
+    print(f"\n{'=' * 60}")
+
+
+def cmd_monitor(args) -> None:
+    """自选股监控扫描命令行处理入口"""
+    from modules.monitor import run_watchlist_monitor
+
+    use_json = getattr(args, "json", False)
+    enable_push = not getattr(args, "no_push", False)
+    days = getattr(args, "days", 30)
+
+    # 运行监控扫描
+    res = run_watchlist_monitor(sync_days=days, enable_push=enable_push)
+
     if use_json:
-        _json_output(report)
+        _json_output(res)
     else:
-        print(f"\n{'=' * 60}")
-        print(f"Z哥每日工作流报告  {today}")
-        print(f"{'=' * 60}")
-        print(f"\n{report['summary']}")
-
-        # 观察池
-        if isinstance(wl, dict) and wl.get("alerts"):
-            print(f"\n【观察池信号】({wl.get('total', 0)}只)")
-            for a in wl["alerts"][:10]:
-                print(f"  [{a['alert_type']}] {a['ts_code']} {a['name']}: {a['message']}")
-
-        # 选股
-        if isinstance(report["top_picks"], list) and report["top_picks"]:
-            print("\n【B1 潜力股 TOP 10】")
-            for i, s in enumerate(report["top_picks"], 1):
-                print(
-                    f"  {i:2}. {s['ts_code']} {s['name']:<8} "
-                    f"评分:{s['score']:5.1f}  B1:{s['b1_score']:5.1f}  {s['rating']}"
-                )
-
-        # 持仓
-        if report["portfolio_status"]:
-            print("\n【持仓诊断】")
-            for p in report["portfolio_status"]:
-                if "error" in p:
-                    print(f"  {p['ts_code']}: 诊断失败 - {p['error']}")
-                else:
-                    print(f"  {p['ts_code']}: {p['diagnosis']}")
-
-        # 信号汇总
-        if report["signals"]:
-            print(f"\n【信号汇总】({len(report['signals'])}条)")
-            for sig in report["signals"]:
-                print(f"  [{sig['signal']}] {sig['ts_code']} {sig['name']}: {sig['message']}")
-
-        print(f"\n{'=' * 60}")
+        # 非 JSON 输出时已经在 run_watchlist_monitor 内部写入了 Markdown 报告，打印简易提示
+        print(f"自选股主动扫描监控完成。状态: {res['status']}, 警报总数: {res.get('alerts_count', 0)}")
+        print(f"详细警报分析已输出至 {REPORTS_DIR}/monitor_alert.md")
 
 
-# ==================== 主入口（独立运行示例） ====================
+def _simulate_narrate_text(result: Any, wf_payload: dict[str, Any] | None) -> dict[str, Any]:
+    """simulate 子命令的 --narrate 适配：单模拟走 narrator；walk-forward 走叙事化摘要。"""
+    if result is not None:
+        try:
+            from .simulator.narrator import generate_simulation_narrative
 
-if __name__ == "__main__":
-    import argparse
+            return generate_simulation_narrative(result)
+        except (ImportError, AttributeError, ValueError, KeyError, TypeError) as exc:
+            logger.warning(
+                "[cli_commands] narrate 失败，使用兜底文案 (code=%s): %s",
+                ErrorCode.CLI_COMMAND_FAILED.value,
+                exc,
+            )
+            return {
+                "simulation_id": "",
+                "ts_codes": [],
+                "days": 0,
+                "narrative_text": f"[narrate 生成失败] {exc}",
+                "generated_at": "",
+                "model_used": "",
+                "cached": False,
+                "error": "narrate_failed",
+            }
 
-    parser = argparse.ArgumentParser(
-        description="Z哥量化工具 CLI 扩展命令",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python -m modules.cli_commands backtest shaofu 600487.SH --days 250 --json
-  python -m modules.cli_commands backtest multi 600487.SH --days 120 --json
-  python -m modules.cli_commands backtest portfolio 600487.SH,601318.SH --days 120 --json
-  python -m modules.cli_commands trade add "4月25号买了100股茅台，1800块"
-  python -m modules.cli_commands trade list --json
-  python -m modules.cli_commands trade review --json
-  python -m modules.cli_commands trade stats --json
-  python -m modules.cli_commands daily --json
-        """,
+    if wf_payload is not None:
+        oos = wf_payload.get("oos_metrics") or {}
+        narrative_lines = [
+            "【Walk-forward OOS 战绩】",
+            f"- 窗口数: {len(wf_payload.get('windows') or [])}",
+            f"- 训练/验证窗口: {wf_payload.get('config', {}).get('train_days')}/{wf_payload.get('config', {}).get('test_days')}",
+            f"- 目标函数: {wf_payload.get('config', {}).get('objective', 'calmar')}",
+            f"- OOS 年化: {oos.get('annualized_return', 0) * 100:+.2f}%",
+            f"- OOS 夏普: {oos.get('sharpe_ratio', 0):.2f}",
+            f"- OOS Calmar: {oos.get('calmar_ratio', 0):.2f}",
+            f"- OOS 最大回撤: {oos.get('max_drawdown', 0) * 100:.2f}%",
+            f"- 过拟合比率: {wf_payload.get('overfit_ratio', 1.0):.2f}（接近 1 = 不过拟合）",
+            "",
+            "（walk-forward 不调 LLM，直接看 OOS 拼接曲线与稳定性）",
+        ]
+        return {
+            "simulation_id": "walk_forward",
+            "ts_codes": [],
+            "days": wf_payload.get("config", {}).get("train_days", 0)
+            + wf_payload.get("config", {}).get("test_days", 0),
+            "narrative_text": "\n".join(narrative_lines),
+            "generated_at": "",
+            "model_used": "",
+            "cached": False,
+        }
+
+    return {}
+
+
+def _simulate_print_narrative(narrative: dict[str, Any]) -> None:
+    """非 JSON 输出模式：把 narrative 以人类可读形式追加到 stdout。"""
+    print("\n" + "=" * 60)
+    print("Z哥点评")
+    print("=" * 60)
+    text = narrative.get("narrative_text") if narrative else ""
+    if not text:
+        text = narrative.get("error", "点评生成失败") if narrative else "点评生成失败"
+    print(text)
+
+
+def cmd_simulate(args) -> None:
+    """
+    少女/少妇模拟器 CLI 入口（v0.2）。
+
+    示例：
+        zt simulate 600487.SH,601318.SH --days 250 --capital 1000000 --json
+        zt simulate --days 120 --max-positions 3 --score 75
+        zt simulate 600487.SH --cost-model advanced --slippage dynamic --atr-sizing
+        zt simulate 600487.SH --days 250 --narrate --json    # LLM 点评
+    """
+    from dataclasses import asdict
+
+    from .simulator.simulator import run_simulation, summary_text
+    from .simulator import SimulationConfig, CostModel
+
+    use_json = getattr(args, "json", False)
+    days = getattr(args, "days", 250)
+    codes_str = getattr(args, "codes", None)
+
+    # 成本模型：simple 保持 v0.1 默认（仅佣金），advanced 启用完整成本
+    if getattr(args, "cost_model", "simple") == "advanced":
+        cost_model = CostModel()
+    else:
+        cost_model = CostModel(
+            commission_rate=0.0003,
+            min_commission=0.0,
+            stamp_duty_rate=0.0,
+            transfer_fee_rate=0.0,
+            apply_stamp_duty_on_sell=False,
+        )
+
+    config = SimulationConfig(
+        initial_capital=getattr(args, "capital", 1_000_000.0),
+        max_positions=getattr(args, "max_positions", 5),
+        risk_per_trade=getattr(args, "risk", 0.02),
+        position_score_threshold=getattr(args, "score", 70.0),
+        signal_min_count=getattr(args, "signals", 2),
+        benchmark_code=getattr(args, "benchmark", "000300.SH"),
+        cost_model=cost_model,
+        use_dynamic_slippage=getattr(args, "slippage", "fixed") == "dynamic",
+        use_atr_sizing=getattr(args, "atr_sizing", False),
+        max_position_pct=getattr(args, "max_position_pct", 0.20),
+        allow_st=not getattr(args, "no_st", False),
+        t1_lock=getattr(args, "t1_lock", True),
+        strategy_mode=getattr(args, "strategy_mode", "simple"),
+        strategy_lookback_days=getattr(args, "strategy_lookback", 5),
+        min_resonance_score=getattr(args, "min_resonance_score", 0.35),
     )
-    subparsers = parser.add_subparsers(dest="command", help="子命令", required=True)
 
-    # ── backtest ──
-    p_bt = subparsers.add_parser("backtest", help="回测（shaofu / multi / portfolio）")
-    p_bt.add_argument("backtest_sub", choices=["shaofu", "multi", "portfolio"], help="回测类型")
-    p_bt.add_argument("ts_code", nargs="?", help="股票代码（shaofu/multi 必填）")
-    p_bt.add_argument("codes", nargs="?", help="股票代码列表（portfolio 用，逗号分隔）")
-    p_bt.add_argument("--days", type=int, default=250, help="回测天数")
-    p_bt.add_argument("--json", action="store_true", help="JSON 输出")
-    p_bt.add_argument("--strategy", default=None, help="策略过滤（暂保留）")
+    ts_codes = None
+    if codes_str:
+        ts_codes = [c.strip() for c in codes_str.split(",") if c.strip()]
 
-    # ── trade ──
-    p_tr = subparsers.add_parser("trade", help="交易记录管理（add / list / review / stats）")
-    p_tr.add_argument("trade_sub", choices=["add", "list", "review", "stats"], help="操作")
-    p_tr.add_argument("text", nargs="?", help="交易描述（add 必填）")
-    p_tr.add_argument("--json", action="store_true", help="JSON 输出")
-    p_tr.add_argument("--limit", type=int, default=20, help="列出条数（list 用）")
+    # 检查是否启用 walk-forward 参数寻优
+    if getattr(args, "walk_forward", False):
+        from .simulator.walk_forward import run_walk_forward, WalkForwardConfig
+        from .simulator.optimizer_report import summary_text as wf_summary_text, to_dict as wf_to_dict
 
-    # ── daily ──
-    p_dy = subparsers.add_parser("daily", help="每日工作流")
-    p_dy.add_argument("--json", action="store_true", help="JSON 输出")
+        wf_config = WalkForwardConfig(
+            train_days=getattr(args, "wf_train_days", 120),
+            test_days=getattr(args, "wf_test_days", 60),
+            objective=getattr(args, "wf_objective", "calmar"),
+        )
 
-    args = parser.parse_args()
+        wf_result = run_walk_forward(
+            ts_codes=ts_codes,
+            total_days=days,
+            wf_config=wf_config,
+            base_config=config,
+        )
 
-    # 调度
-    handlers = {
-        "backtest": cmd_backtest,
-        "trade": cmd_trade,
-        "daily": cmd_daily,
-    }
-    handlers[args.command](args)
+        if use_json:
+            payload = wf_to_dict(wf_result)
+            if getattr(args, "narrate", False):
+                payload["narrative"] = _simulate_narrate_text(result=None, wf_payload=payload)
+            _json_output(payload)
+        else:
+            print(wf_summary_text(wf_result))
+            if getattr(args, "narrate", False):
+                _simulate_print_narrative(_simulate_narrate_text(result=None, wf_payload=None))
+        return
+
+    result = run_simulation(ts_codes=ts_codes, days=days, config=config)
+
+    metrics_dict = asdict(result.metrics) if result.metrics else None
+
+    if use_json:
+        output_dict = {
+            "initial_capital": result.initial_capital,
+            "final_value": result.final_value,
+            "total_return": round(result.total_return * 100, 2),
+            "max_drawdown": round(result.max_drawdown * 100, 2),
+            "sharpe_ratio": round(result.sharpe_ratio, 2),
+            "total_trades": result.total_trades,
+            "win_rate": round(result.win_rate, 3),
+            "profit_factor": round(result.profit_factor, 2),
+            "avg_holding_days": round(result.avg_holding_days, 1),
+            "open_positions": len(result.positions),
+            "trades": [
+                {
+                    "ts_code": t.ts_code,
+                    "action": t.action,
+                    "date": t.date,
+                    "price": t.price,
+                    "shares": t.shares,
+                    "pnl": t.pnl,
+                    "pnl_pct": round(t.pnl_pct * 100, 2),
+                    "reason": t.reason,
+                }
+                for t in result.trades
+            ],
+            "equity_curve_sample": result.equity_curve[:: max(1, len(result.equity_curve) // 30)],
+            "metrics": metrics_dict,
+            "benchmark_curve_sample": result.benchmark_curve[:: max(1, len(result.benchmark_curve) // 30)],
+            "resonance_details": result.resonance_summary,
+        }
+
+        if getattr(args, "narrate", False):
+            output_dict["narrative"] = _simulate_narrate_text(result=result, wf_payload=None)
+
+        _json_output(output_dict)
+    else:
+        print(summary_text(result))
+        if getattr(args, "narrate", False):
+            _simulate_print_narrative(_simulate_narrate_text(result=result, wf_payload=None))
+
+
+# ==================== 4. cmd_verify_v10（M4 验收 CLI 适配）====================
+
+
+def cmd_verify_v10(args) -> int:
+    """少妇战法 v1.0 验收子命令"""
+    from modules.verify.cli import main as verify_main
+
+    # 把 argparse Namespace 转成 main() 接受的 argv 列表
+    argv = []
+    if args.limit != 50:
+        argv.extend(["--limit", str(args.limit)])
+    if args.days != 250:
+        argv.extend(["--days", str(args.days)])
+    if getattr(args, "walk_forward", False):
+        argv.append("--walk-forward")
+    if getattr(args, "wf_train", 120) != 120:
+        argv.extend(["--wf-train", str(args.wf_train)])
+    if getattr(args, "wf_test", 60) != 60:
+        argv.extend(["--wf-test", str(args.wf_test)])
+    if getattr(args, "ts_codes", None):
+        argv.extend(["--ts-codes", args.ts_codes])
+    if getattr(args, "output", None) and args.output != str(REPORTS_DIR):
+        argv.extend(["--output", args.output])
+    if getattr(args, "json", False):
+        argv.append("--json")
+    if getattr(args, "no_markdown", False):
+        argv.append("--no-markdown")
+    return verify_main(argv)
+
+
+def add_verify_v10_parser(subparsers) -> None:
+    """注册 verify v1.0 验收子命令"""
+    p_verify = subparsers.add_parser("verify", help="v1.0 验收")
+    p_verify.add_argument("version", choices=["v1.0"], help="验收版本")
+    p_verify.add_argument("--limit", type=int, default=50)
+    p_verify.add_argument("--days", type=int, default=250)
+    p_verify.add_argument("--walk-forward", action="store_true")
+    p_verify.add_argument("--wf-train", type=int, default=120)
+    p_verify.add_argument("--wf-test", type=int, default=60)
+    p_verify.add_argument("--ts-codes", type=str, default=None, help="指定股票列表（逗号分隔）")
+    p_verify.add_argument("--output", type=str, default=str(REPORTS_DIR), help="报告输出目录")
+    p_verify.add_argument("--json", action="store_true")
+    p_verify.add_argument("--no-markdown", action="store_true")
+    p_verify.set_defaults(func=cmd_verify_v10)

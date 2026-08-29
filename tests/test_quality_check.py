@@ -35,12 +35,12 @@ def test_json_output_is_valid_json():
     assert isinstance(data, dict)
 
 
-def test_json_output_has_eight_checks():
-    """--json 输出必须包含 8 项 check"""
+def test_json_output_has_twelve_checks():
+    """--json 输出必须包含 12 项 check"""
     result = run_quality_check("--json")
     data = json.loads(result.stdout)
     assert "checks" in data
-    assert len(data["checks"]) == 8, f"expected 8 checks, got {len(data['checks'])}"
+    assert len(data["checks"]) == 12, f"expected 12 checks, got {len(data['checks'])}"
 
 
 def test_json_output_has_summary_fields():

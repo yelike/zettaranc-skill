@@ -10,6 +10,7 @@ from .core import (
     calculate_ma,
     calculate_bbi,
     calculate_kdj,
+    precompute_kdj_sequence,
     calculate_macd,
     calculate_vol_ratio,
 )
@@ -168,10 +169,10 @@ def detect_trade_signal(klines: list[DailyData]) -> TradeSignal:
     today = klines[-1]
     yesterday = klines[-2]
 
-    # 计算当前指标
-    k, d, j = calculate_kdj(klines)
+    # 计算当前指标（kdj_seq[m] 与 calculate_kdj(klines[:m+1]) 逐位等值，已实证）
+    kdj_seq = precompute_kdj_sequence(klines)
+    k, d, j = kdj_seq[-1]
     dif_list, dea_list, macd_list = calculate_macd(klines)
-    macd_list[-1] if macd_list else 0
 
     # MACD 语料判断
     macd_signals = {}
@@ -208,10 +209,9 @@ def detect_trade_signal(klines: list[DailyData]) -> TradeSignal:
 
     # B2: B1后放量确认
     if j > -10 and j < 55:
-        prev_j_list = []
-        for i in range(2, min(10, len(klines))):
-            pk, pd, pj = calculate_kdj(klines[:-i])
-            prev_j_list.append(pj)
+        n_klines = len(klines)
+        # kdj_seq[n-i-1][2] == calculate_kdj(klines[:-i])[2]（KDJ 前缀一致，已实证等值）
+        prev_j_list = [kdj_seq[n_klines - i - 1][2] for i in range(2, min(10, n_klines))]
 
         if any(pj < -10 for pj in prev_j_list):
             if today.pct_chg > 4 and vol_pattern["is_beidou"]:
@@ -320,7 +320,8 @@ def detect_chuhuo_wushi(klines: list[DailyData]) -> dict:
             # 两个高点差异 < 5%，且间隔至少3天
             if abs(h1 - h2) / h1 < 0.05 and abs(h1_idx - h2_idx) >= 3:
                 # 检查每个高点后是否有放量阴线
-                def has_fangliang_yinxian_after(idx):
+                def has_fangliang_yinxian_after(idx) -> bool:
+                    """检测 idx 之后 3 天内是否出现放量阴线（量 >= 5 日均量 1.3 倍）。"""
                     for j in range(idx + 1, min(idx + 4, len(recent_20))):
                         k = recent_20[j]
                         if k.close < k.open and k.vol >= avg_vol_5 * 1.3:

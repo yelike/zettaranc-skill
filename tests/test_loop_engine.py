@@ -336,4 +336,21 @@ class TestRunStock:
         for t in trades:
             assert isinstance(t, LoopTrade)
             assert t.entry_date <= t.exit_date
-            assert t.exit_reason in ("止损", "卤煮止盈", "白线跌破", "白线死叉黄线", "数据末尾", "未知")
+
+    def test_position_pct_propagates_to_trade(self):
+        """LoopConfig.position_pct 应正确传入 LoopTrade"""
+        engine = ShaofuLoopEngine(LoopConfig(position_pct=0.25))
+        # 构造能产生 B1 的序列
+        prices = [100 + i * 0.3 for i in range(60)]
+        last_price = prices[-1]
+        for i in range(20):
+            last_price *= 0.96
+            prices.append(last_price)
+        for i in range(15):
+            last_price *= 1.03
+            prices.append(last_price)
+        klines = make_klines_seq(prices)
+        trades = engine.run_stock(klines)
+        if trades:
+            assert all(t.position_pct == 0.25 for t in trades)
+            assert trades[-1].exit_reason in ("止损", "卤煮止盈", "白线跌破", "白线死叉黄线", "数据末尾", "未知")

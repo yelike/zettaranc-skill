@@ -6,6 +6,11 @@
 >
 > 对应输出信号字典 → `signal_dictionary.md`
 
+<!-- Skill-Runtime
+加载时机: Agent 需要理解数据结构或映射 Tushare 字段时
+用途: 见文件标题与目录
+大小: ~6KB
+-->
 ---
 
 ## 一、核心数据实体

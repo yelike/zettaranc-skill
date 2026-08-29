@@ -114,20 +114,30 @@ class TestApiMethods:
         return c
 
     def test_get_daily_returns_dataframe(self, client):
-        """get_daily 正常返回 DataFrame"""
+        """get_daily 正常返回 DataFrame（JNB 模式 _pro 可用时）"""
         mock_df = pd.DataFrame({"trade_date": ["20260115"], "close": [100.0]})
+        client._pro = MagicMock()
         with patch("modules.tushare_client.ts.pro_bar", return_value=mock_df):
             result = client.get_daily("600519.SH", "20260101", "20260115")
             assert result is not None
             assert len(result) == 1
             assert result.iloc[0]["close"] == 100.0
 
-    def test_get_daily_exception_returns_empty(self, client):
-        """get_daily 异常时返回空 DataFrame"""
-        with patch("modules.tushare_client.ts.pro_bar", side_effect=Exception("API error")):
+    def test_get_daily_websearch_returns_none(self, client):
+        """websearch 模式 _pro=None（无数据后端）时 get_daily 返回 None，不触发 ts.pro_bar"""
+        with patch("modules.tushare_client.ts.pro_bar") as mock_bar:
+            assert client.get_daily("600519.SH", "20260101", "20260115") is None
+            mock_bar.assert_not_called()
+
+    def test_get_daily_exception_returns_none(self, client):
+        """get_daily 异常时返回 None
+
+        M4: _call_api_with_retry 已收窄为 requests.RequestException/TimeoutError/
+        ConnectionError/KeyError/ValueError，模拟用 ConnectionError 触发。
+        """
+        with patch("modules.tushare_client.ts.pro_bar", side_effect=ConnectionError("API error")):
             result = client.get_daily("600519.SH", "20260101", "20260115")
-            assert isinstance(result, pd.DataFrame)
-            assert len(result) == 0
+            assert result is None
 
     def test_get_index_daily_returns_dataframe(self, client):
         mock_df = pd.DataFrame({"trade_date": ["20260115"], "close": [3500.0]})
@@ -136,12 +146,11 @@ class TestApiMethods:
         result = client.get_index_daily("000300.SH", "20260101", "20260115")
         assert len(result) == 1
 
-    def test_get_index_daily_exception_returns_empty(self, client):
+    def test_get_index_daily_exception_returns_none(self, client):
         client._pro = MagicMock()
-        client._pro.index_daily.side_effect = Exception("API error")
+        client._pro.index_daily.side_effect = ConnectionError("API error")
         result = client.get_index_daily("000300.SH", "20260101", "20260115")
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 0
+        assert result is None
 
     def test_get_realtime_quote_returns_dataframe(self, client):
         mock_df = pd.DataFrame({"TS_CODE": ["600519.SH"], "PRICE": [1800.0]})
@@ -149,11 +158,10 @@ class TestApiMethods:
             result = client.get_realtime_quote(["600519.SH"])
             assert len(result) == 1
 
-    def test_get_realtime_quote_exception_returns_empty(self, client):
-        with patch("modules.tushare_client.ts.realtime_quote", side_effect=Exception("API error")):
+    def test_get_realtime_quote_exception_returns_none(self, client):
+        with patch("modules.tushare_client.ts.realtime_quote", side_effect=ConnectionError("API error")):
             result = client.get_realtime_quote(["600519.SH"])
-            assert isinstance(result, pd.DataFrame)
-            assert len(result) == 0
+            assert result is None
 
     def test_get_moneyflow(self, client):
         mock_df = pd.DataFrame({"ts_code": ["600519.SH"], "buy_sm_amount": [1000.0]})
@@ -176,12 +184,11 @@ class TestApiMethods:
         result = client.get_stock_basic(name="贵州茅台")
         assert len(result) == 1
 
-    def test_get_stock_basic_exception_returns_empty(self, client):
+    def test_get_stock_basic_exception_returns_none(self, client):
         client._pro = MagicMock()
-        client._pro.stock_basic.side_effect = Exception("API error")
+        client._pro.stock_basic.side_effect = ConnectionError("API error")
         result = client.get_stock_basic(ts_code="600519.SH")
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 0
+        assert result is None
 
     def test_get_limit_list(self, client):
         mock_df = pd.DataFrame({"ts_code": ["600519.SH"], "limit": ["U"]})
@@ -220,6 +227,7 @@ class TestApiMethods:
 
     def test_check_connection_success(self, client):
         mock_df = pd.DataFrame({"close": [100.0]})
+        client._pro = MagicMock()
         with patch("modules.tushare_client.ts.pro_bar", return_value=mock_df):
             assert client.check_connection() is True
 

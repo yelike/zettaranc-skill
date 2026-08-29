@@ -114,7 +114,7 @@ def match_strategy(indicators: dict[str, Any]) -> StrategySignal | None:
 class TradeManager:
     """交易记录管理器"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def add_trade(self, trade_data: dict[str, Any]) -> int:

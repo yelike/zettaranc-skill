@@ -10,11 +10,13 @@
 5. 止损/止盈位提示
 """
 
-from typing import Any, Optional
+import logging
+import sqlite3
 from dataclasses import dataclass, field
+from typing import Any, Optional
 
-# dotenv 加载已移至 modules/__init__.py（包级别一次性加载）
-
+from .core.errors import ErrorCode
+from .datasource import daily_to_dict
 from .indicators import (
     analyze_stock,
     get_kline_data,
@@ -24,8 +26,16 @@ from .indicators import (
     detect_centipede_pattern,
     detect_bull_rope,
     calculate_sandglass_score,
+    detect_kirin_stage,
 )
-from .strategies import detect_all_strategies, analyze_kirin_phase, StrategyType
+from .strategies import detect_all_strategies, StrategyType
+
+# dotenv 加载已移至 modules/__init__.py（包级别一次性加载）
+
+logger = logging.getLogger(__name__)
+
+# 向后兼容别名
+_daily_to_dict = daily_to_dict
 
 
 @dataclass
@@ -107,14 +117,12 @@ def diagnose_stock(ts_code: str, days: int = 100) -> DiagnosisReport:
 
     # K线数据（用于防卖飞评分和麒麟会阶段）
     klines_daily = get_kline_data(ts_code, days=days)
-    klines_dict = _daily_to_dict(klines_daily)
 
     # 防卖飞评分
     sell_score, sell_desc, sell_details = calculate_sell_score(klines_daily)
 
     # 战法信号（最近30天内）
     all_signals = detect_all_strategies(ts_code, days=days)
-    [s for s in all_signals if s.trade_date >= indicators.trade_date[:6] + "01" or True]
 
     # 分离买卖信号
     buy_signals = []
@@ -133,7 +141,7 @@ def diagnose_stock(ts_code: str, days: int = 100) -> DiagnosisReport:
             buy_signals.append(sig_dict)
 
     # 麒麟会阶段
-    kirin = analyze_kirin_phase(klines_dict)
+    kirin = detect_kirin_stage(klines_daily)
 
     # 蜈蚣图 / 牛绳 / 沙漏
     centipede = detect_centipede_pattern(klines_daily)
@@ -171,7 +179,7 @@ def diagnose_stock(ts_code: str, days: int = 100) -> DiagnosisReport:
         sell_score_details=sell_details,
         exit_signals=exit_signals[:5],
         buy_signals=buy_signals[:5],
-        kirin_phase=kirin.get("phase", "UNKNOWN"),
+        kirin_phase=kirin.get("stage", "UNKNOWN"),
         kirin_confidence=kirin.get("confidence", 0),
         is_centipede=centipede.get("is_centipede", False),
         centipede_score=centipede.get("score", 0),
@@ -197,38 +205,14 @@ def get_stock_info_db(ts_code: str) -> dict[str, Any] | None:
             cursor.execute("SELECT * FROM stock_basic WHERE ts_code = ?", (ts_code,))
             row = cursor.fetchone()
             return dict(row) if row else None
-    except Exception:
-        return None
-
-
-def _daily_to_dict(klines: list[DailyData]) -> list[dict[str, Any]]:
-    """将 DailyData 列表转为 strategies 模块需要的 dict 列表"""
-    result = []
-    for i, k in enumerate(klines):
-        prev_close = klines[i - 1].close if i > 0 else k.close
-        prev_vol = klines[i - 1].vol if i > 0 else k.vol
-        result.append(
-            {
-                "ts_code": k.ts_code,
-                "trade_date": k.trade_date,
-                "open": k.open,
-                "high": k.high,
-                "low": k.low,
-                "close": k.close,
-                "vol": k.vol,
-                "amount": k.amount,
-                "pct_chg": k.pct_chg,
-                "prev_close": prev_close,
-                "prev_vol": prev_vol,
-                "is_rise": k.close > prev_close,
-                "is_beidou": k.vol >= prev_vol * 2 if prev_vol > 0 else False,
-                "is_suoliang": k.vol <= prev_vol * 0.5 if prev_vol > 0 else False,
-                "is_jiayin": k.close < k.open and k.close > prev_close,
-                "is_yinxian": k.close < prev_close,
-                "is_fangliang_yinxian": k.close < prev_close and k.vol > prev_vol * 1.5 if prev_vol > 0 else False,
-            }
+    except (OSError, sqlite3.Error, KeyError) as e:
+        # 名称为可选：DB 不可用时仅记录日志，降级为返回 None
+        logger.warning(
+            "[组合诊断] 读取 stock_basic 失败 (code=%s): %s",
+            ErrorCode.DB_ERROR.value,
+            e,
         )
-    return result
+        return None
 
 
 def _judge_price_position(ind: IndicatorResult, price: float = 0) -> str:
@@ -390,7 +374,7 @@ def format_report(report: DiagnosisReport) -> str:
 # ==================== 命令行工具 ====================
 
 
-def main():
+def main() -> None:
     """命令行入口"""
     import argparse
 

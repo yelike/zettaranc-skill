@@ -34,6 +34,7 @@ from .indicators import (
     detect_double_line_cross,
     detect_trade_signal,
 )
+from .constants import BACKTEST_DEFAULT_TRAILING_STOP_PCT
 
 
 # ============================================================
@@ -61,8 +62,14 @@ class LoopConfig:
     """策略参数配置"""
 
     j_threshold: float = 12  # B1 J 值阈值（SOP: J<=12，最好负值）
-    stop_loss_pct: float = -0.07  # 止损比例（负值，默认 -7%）
-    stop_loss_method: str = "entry_low"  # "entry_low" | "n_structure_low" | "j_negative_low"
+    stop_loss_pct: float = -0.03  # 止损比例（现已实际生效，原硬编码 0.97 = -3%）
+    stop_loss_method: str = "entry_low"  # "entry_low" | "n_structure_low" | "j_negative_low" | "atr_based"
+    # v3.10.1 新增：ATR 动态止损
+    atr_stop_window: int = 14  # ATR 计算窗口
+    atr_stop_multiplier: float = 2.0  # ATR 乘数（止损距离 = ATR × 倍数）
+    # v3.10.1 新增：移动止损（trailing stop）
+    trailing_stop_enabled: bool = False  # 是否启用移动止损
+    trailing_stop_pct: float = BACKTEST_DEFAULT_TRAILING_STOP_PCT  # 移动止损比例（高点回落超过此比例则止损）
     bbi_break_days: int = 2  # BBI 连续跌破天数触发离场
     bbi_break_threshold: float = 0.01  # 收盘价低于 BBI 超过此比例才算"跌破"（1%）
     min_holding_days: int = 3  # 最少持仓天数（避免入场后次日就被震出）
@@ -70,16 +77,43 @@ class LoopConfig:
     position_pct: float = 0.3  # 单笔仓位比例
     vol_shrink_threshold: float = 0.8  # 缩量判定阈值（当日量 / 前日量 < 此值视为缩量）
 
+    @classmethod
+    def from_registry(cls, strategy_name: str = "shaofu_v1") -> LoopConfig | None:
+        """
+        从 param_registry 读取 LoopConfig（可选扩展点）。
+
+        注意：本方法需要循环依赖避免，所以延迟 import：
+        - modules.verify.registry_writer.load_config_from_registry
+        - 若 modules.verify 不可用（如 zettaranc_skill 未安装 verify 子包），
+          返回 None
+        """
+        try:
+            from modules.verify.registry_writer import load_config_from_registry
+
+            return load_config_from_registry(strategy_name)
+        except ImportError:
+            return None
+
 
 @dataclass
 class LoopTrade:
-    """一笔完整的少妇战法交易记录"""
+    """一笔完整的少妇战法交易记录
+
+    记录从入场到出价的完整交易生命周期，包含：
+    - 入场信息：日期、价格、原因（B1 信号详情）
+    - 出场信息：日期、价格、原因（卤煮止盈/白线跌破/止损/白线死叉黄线）
+    - 过程指标：盈亏比、持仓天数、最大浮盈/浮亏
+    - 仓位管理：卤煮减仓记录、实际仓位比例
+    - 市场环境：入场时的市场状态（BULL/BEAR/SIDEWAYS）
+    """
 
     ts_code: str
     entry_date: str
     entry_price: float
     entry_reason: str  # B1 信号详情
     stop_loss_price: float  # Step 4: 收盘价止损位
+    # v3.10.1：移动止损追踪入场后最高点（用于动态抬高止损价）
+    highest_after_entry: float = 0.0
     exit_date: str = ""
     exit_price: float = 0
     exit_reason: str = ""  # "卤煮止盈" | "白线跌破" | "止损" | "白线死叉黄线"
@@ -88,6 +122,9 @@ class LoopTrade:
     max_favorable: float = 0  # 最大浮盈%
     max_adverse: float = 0  # 最大浮亏%
     partial_exits: list[dict[str, Any]] = field(default_factory=list)  # 卤煮减仓记录
+    position_pct: float = 0.0  # 该笔交易的实际仓位比例（占总资金）
+    market_regime: str = ""  # 入场时的市场状态（BULL/BEAR/SIDEWAYS）
+    strategy_source: str = ""  # v3.10.0：触发该交易的策略名（B1/B2/SB1/长安 等）
 
 
 # ============================================================
@@ -124,19 +161,27 @@ def _calc_stop_loss_price(
     klines: list[DailyData],
     day_idx: int,
     method: str = "entry_low",
+    stop_loss_pct: float = -0.07,
+    atr_multiplier: float = 2.0,
+    atr_window: int = 14,
 ) -> float:
     """
     根据不同方法计算止损价
 
-    三种方法（SOP 第 4 步）：
-    - entry_low: 入场 K 线最低价
+    四种方法（SOP 第 4 步）：
+    - entry_low: 入场 K 线最低价 + 止损比例缓冲
     - n_structure_low: N 型结构前低（入场前最近一个回调低点）
     - j_negative_low: J 值转负那天 K 线的最低价
+    - atr_based: v3.10.1 ATR 动态止损 = 入场价 - ATR × 倍数
+      （高波动自动放宽，低波动自动收紧）
 
     Args:
         klines: K 线数据
         day_idx: 入场日索引
-        method: 止损方法
+        method: 止损方法（"entry_low"/"n_structure_low"/"j_negative_low"/"atr_based"）
+        stop_loss_pct: 止损比例（负值，如 -0.07 表示 -7%），仅 entry_low 模式使用
+        atr_multiplier: ATR 倍数（止损距离 = ATR × 倍数），仅 atr_based 模式使用
+        atr_window: ATR 计算窗口，仅 atr_based 模式使用
 
     Returns:
         止损价
@@ -144,7 +189,9 @@ def _calc_stop_loss_price(
     entry_kline = klines[day_idx]
 
     if method == "entry_low":
-        return entry_kline.low
+        # 入场日最低价 × (1 + 止损比例)
+        # stop_loss_pct=-0.07 表示入场低下方 7% 为止损位
+        return entry_kline.low * (1 + stop_loss_pct)
 
     if method == "n_structure_low":
         # 回溯找入场前最近的回调低点（N 型结构的前低）
@@ -166,8 +213,45 @@ def _calc_stop_loss_price(
         # 未找到则退化为 entry_low
         return entry_kline.low
 
+    if method == "atr_based":
+        # v3.10.1：ATR 动态止损
+        # 止损价 = 入场参考价 - ATR × 倍数
+        # 入场参考价用 entry_kline.close，更贴近实际成交
+        from .core.atr import calculate_atr
+
+        # 用入场前 window+1 根 K 线计算 ATR（不偷看入场日之后数据）
+        atr_window_klines = klines[max(0, day_idx - atr_window - 1) : day_idx + 1]
+        atr_value = calculate_atr(atr_window_klines, window=min(atr_window, len(atr_window_klines) - 1))
+        if atr_value <= 0:
+            # 数据不足 fallback 到 entry_low
+            return entry_kline.low * (1 + stop_loss_pct)
+        entry_ref = entry_kline.close or entry_kline.open
+        return entry_ref - atr_value * atr_multiplier
+
     # 默认
     return entry_kline.low
+
+
+def calc_trailing_stop_price(
+    highest_after_entry: float,
+    trailing_stop_pct: float,
+) -> float:
+    """
+    计算移动止损价（v3.10.1）
+
+    移动止损：当股价上涨时，止损价同步上移（保护浮盈）；
+    当股价下跌时，止损价固定不变（不下移）。
+
+    Args:
+        highest_after_entry: 入场后最高价
+        trailing_stop_pct: 移动止损比例（负值，如 -0.05 表示从高点回落 5%）
+
+    Returns:
+        移动止损价
+    """
+    if highest_after_entry <= 0:
+        return 0.0
+    return highest_after_entry * (1 + trailing_stop_pct)
 
 
 # ============================================================
@@ -192,7 +276,7 @@ class ShaofuLoopEngine:
     - 支持回测场景（顺序遍历历史数据）
     """
 
-    def __init__(self, config: LoopConfig | None = None):
+    def __init__(self, config: LoopConfig | None = None) -> None:
         """
         初始化引擎
 
@@ -366,7 +450,7 @@ class ShaofuLoopEngine:
         trade: LoopTrade,
     ) -> bool:
         """
-        内部止损检查
+        内部止损检查（v3.10.1 支持 trailing stop）
 
         Args:
             klines: K 线数据
@@ -374,9 +458,18 @@ class ShaofuLoopEngine:
             trade: 当前交易
 
         Returns:
-            是否触发止损
+            是否触发止损（原始止损价 或 移动止损 任一触发）
         """
-        return self.check_stop_loss(klines[day_idx], trade.stop_loss_price)
+        current = klines[day_idx]
+        # 原始止损检查
+        if self.check_stop_loss(current, trade.stop_loss_price):
+            return True
+        # v3.10.1：移动止损检查（仅在启用时）
+        if self.config.trailing_stop_enabled and trade.highest_after_entry > 0:
+            trailing_price = calc_trailing_stop_price(trade.highest_after_entry, self.config.trailing_stop_pct)
+            if trailing_price > 0 and current.close < trailing_price:
+                return True
+        return False
 
     def _check_lu_zhu_internal(self, klines: list[DailyData], day_idx: int) -> bool:
         """
@@ -484,124 +577,113 @@ class ShaofuLoopEngine:
         return second_low >= first_low * 0.98
 
     # ----------------------------------------------------------
+    # 离场检查（共享逻辑，消除 run_stock / process_day 重复）
+    # ----------------------------------------------------------
+
+    def _close_trade(self, trade: LoopTrade, date: str, price: float, reason: str, pnl_pct: float) -> LoopTrade:
+        """平仓并返回已完成的交易"""
+        trade.exit_date = date
+        trade.exit_price = price
+        trade.exit_reason = reason
+        trade.pnl_pct = pnl_pct
+        return trade
+
+    def _apply_exit_checks(
+        self, klines: list[DailyData], day_idx: int, trade: LoopTrade
+    ) -> tuple[LoopTrade | None, LoopTrade | None]:
+        """六层离场检查，返回 (更新后的持仓, 已完成的交易)
+
+        被 run_stock 和 process_day 共享调用。
+        """
+        current_price = klines[day_idx].close
+        pnl_pct = (current_price - trade.entry_price) / trade.entry_price * 100
+        trade.max_favorable = max(trade.max_favorable, pnl_pct)
+        trade.max_adverse = min(trade.max_adverse, pnl_pct)
+        # v3.10.1：追踪入场后最高价（驱动移动止损上移）
+        current_high = klines[day_idx].high
+        trade.highest_after_entry = max(trade.highest_after_entry, current_high)
+        trade.holding_days += 1
+
+        # 白线死叉黄线（无条件清仓）
+        if self._check_dead_cross_exit(klines, day_idx):
+            return None, self._close_trade(trade, klines[day_idx].trade_date, current_price, "白线死叉黄线", pnl_pct)
+
+        # 最少持仓天数保护（止损在保护期后才生效，避免入场次日被震出）
+        if trade.holding_days < self.config.min_holding_days:
+            return trade, None
+
+        # Step 4: 收盘价止损
+        if self._check_stop_loss_internal(klines, day_idx, trade):
+            return None, self._close_trade(trade, klines[day_idx].trade_date, current_price, "止损", pnl_pct)
+
+        # Step 6: 白线两日破位
+        if self._check_white_line_exit_internal(klines, day_idx):
+            return None, self._close_trade(trade, klines[day_idx].trade_date, current_price, "白线跌破", pnl_pct)
+
+        # Step 5: 卤煮止盈
+        if self._check_lu_zhu_internal(klines, day_idx):
+            if self.config.lu_half:
+                trade.partial_exits.append(
+                    {
+                        "date": klines[day_idx].trade_date,
+                        "price": current_price,
+                        "pnl_pct": pnl_pct,
+                        "type": "卤煮减半",
+                    }
+                )
+                trade.entry_reason += " [已卤煮减半]"
+                return trade, None
+            else:
+                return None, self._close_trade(trade, klines[day_idx].trade_date, current_price, "卤煮止盈", pnl_pct)
+
+        return trade, None
+
+    # ----------------------------------------------------------
     # 主循环
     # ----------------------------------------------------------
 
     def run_stock(self, klines: list[DailyData], ts_code: str = "") -> list[LoopTrade]:
-        """
-        对一只股票运行完整的六步闭环
+        """对一只股票运行完整的六步闭环
 
-        从第 30 根 K 线开始（需要足够数据计算指标），
-        顺序遍历每一天，自动完成入场→持仓→离场的循环。
-
-        Args:
-            klines: 按日期升序排列的 K 线数据
-            ts_code: 股票代码（可选，用于记录）
-
-        Returns:
-            所有已完成的交易记录列表
+        从第 30 根 K 线开始，自动完成入场→持仓→离场的循环。
         """
         if not klines or len(klines) < 30:
             return []
 
-        # 从 klines 中提取 ts_code（如果未提供）
         if not ts_code:
             ts_code = klines[0].ts_code if klines else ""
 
         completed_trades: list[LoopTrade] = []
         current_trade: LoopTrade | None = None
 
-        # 从第 30 根开始，确保指标有足够数据
         for day_idx in range(30, len(klines)):
             if current_trade is None:
-                # 等B1 阶段：检查入场条件
                 signal = self._check_entry_internal(klines, day_idx)
                 if signal is not None:
-                    # 开仓
                     entry_price = klines[day_idx].close
-                    stop_loss = _calc_stop_loss_price(klines, day_idx, self.config.stop_loss_method)
+                    stop_loss = _calc_stop_loss_price(
+                        klines, day_idx, self.config.stop_loss_method, self.config.stop_loss_pct
+                    )
                     current_trade = LoopTrade(
                         ts_code=ts_code,
                         entry_date=klines[day_idx].trade_date,
                         entry_price=entry_price,
                         entry_reason=signal.get("reason", "B1信号"),
                         stop_loss_price=stop_loss,
+                        position_pct=self.config.position_pct,
                     )
             else:
-                # 持仓阶段：逐日检查止损/止盈/离场
-                # 更新浮盈浮亏
-                current_price = klines[day_idx].close
-                pnl_pct = (current_price - current_trade.entry_price) / current_trade.entry_price * 100
-                current_trade.max_favorable = max(current_trade.max_favorable, pnl_pct)
-                current_trade.max_adverse = min(current_trade.max_adverse, pnl_pct)
-                current_trade.holding_days += 1
-
-                # Step 4: 收盘价止损（始终检查，不受 min_holding_days 限制）
-                if self._check_stop_loss_internal(klines, day_idx, current_trade):
-                    current_trade.exit_date = klines[day_idx].trade_date
-                    current_trade.exit_price = current_price
-                    current_trade.exit_reason = "止损"
-                    current_trade.pnl_pct = pnl_pct
-                    completed_trades.append(current_trade)
+                current_trade, completed = self._apply_exit_checks(klines, day_idx, current_trade)
+                if completed:
+                    completed_trades.append(completed)
                     current_trade = None
                     continue
-
-                # 紧急离场：白线死叉黄线（无条件清仓，始终检查）
-                if self._check_dead_cross_exit(klines, day_idx):
-                    current_trade.exit_date = klines[day_idx].trade_date
-                    current_trade.exit_price = current_price
-                    current_trade.exit_reason = "白线死叉黄线"
-                    current_trade.pnl_pct = pnl_pct
-                    completed_trades.append(current_trade)
-                    current_trade = None
-                    continue
-
-                # 最少持仓天数保护：避免入场后次日被震出
-                if current_trade.holding_days < self.config.min_holding_days:
-                    continue
-
-                # Step 6: 白线两日破位（全仓离场）
-                if self._check_white_line_exit_internal(klines, day_idx):
-                    current_trade.exit_date = klines[day_idx].trade_date
-                    current_trade.exit_price = current_price
-                    current_trade.exit_reason = "白线跌破"
-                    current_trade.pnl_pct = pnl_pct
-                    completed_trades.append(current_trade)
-                    current_trade = None
-                    continue
-
-                # Step 5: 卤煮止盈（减半或全部）
-                if self._check_lu_zhu_internal(klines, day_idx):
-                    if self.config.lu_half:
-                        # 减半：记录减仓，继续持有另一半
-                        current_trade.partial_exits.append(
-                            {
-                                "date": klines[day_idx].trade_date,
-                                "price": current_price,
-                                "pnl_pct": pnl_pct,
-                                "type": "卤煮减半",
-                            }
-                        )
-                        # 标记已减半，后续不再重复减
-                        current_trade.entry_reason += " [已卤煮减半]"
-                    else:
-                        # 不减半则全部止盈
-                        current_trade.exit_date = klines[day_idx].trade_date
-                        current_trade.exit_price = current_price
-                        current_trade.exit_reason = "卤煮止盈"
-                        current_trade.pnl_pct = pnl_pct
-                        completed_trades.append(current_trade)
-                        current_trade = None
 
         # 数据末尾：强制平仓
         if current_trade is not None and klines:
             last = klines[-1]
             pnl_pct = (last.close - current_trade.entry_price) / current_trade.entry_price * 100
-            current_trade.exit_date = last.trade_date
-            current_trade.exit_price = last.close
-            current_trade.exit_reason = "数据末尾"
-            current_trade.pnl_pct = pnl_pct
-            completed_trades.append(current_trade)
+            completed_trades.append(self._close_trade(current_trade, last.trade_date, last.close, "数据末尾", pnl_pct))
 
         return completed_trades
 
@@ -612,25 +694,15 @@ class ShaofuLoopEngine:
         day_idx: int,
         current_trade: LoopTrade | None = None,
     ) -> tuple[LoopTrade | None, LoopTrade | None]:
-        """
-        处理单日数据（供外部精细控制调用）
-
-        Args:
-            ts_code: 股票代码
-            klines: 完整 K 线数据
-            day_idx: 当前处理的日期索引
-            current_trade: 当前持仓（None 表示空仓）
+        """处理单日数据（供外部精细控制调用）
 
         Returns:
-            (updated_trade, completed_trade)：
-            - updated_trade: 更新后的持仓（可能为 None 表示刚平仓）
-            - completed_trade: 如果当天平仓则返回完成的交易，否则 None
+            (updated_trade, completed_trade)
         """
         if day_idx < 30 or day_idx >= len(klines):
             return current_trade, None
 
         if current_trade is None:
-            # 空仓：检查入场
             signal = self._check_entry_internal(klines, day_idx)
             if signal is not None:
                 entry_price = klines[day_idx].close
@@ -641,61 +713,12 @@ class ShaofuLoopEngine:
                     entry_price=entry_price,
                     entry_reason=signal.get("reason", "B1信号"),
                     stop_loss_price=stop_loss,
+                    position_pct=self.config.position_pct,
                 )
                 return new_trade, None
             return None, None
 
-        # 持仓中：更新浮盈浮亏
-        current_price = klines[day_idx].close
-        pnl_pct = (current_price - current_trade.entry_price) / current_trade.entry_price * 100
-        current_trade.max_favorable = max(current_trade.max_favorable, pnl_pct)
-        current_trade.max_adverse = min(current_trade.max_adverse, pnl_pct)
-        current_trade.holding_days += 1
-
-        # Step 4: 止损
-        if self._check_stop_loss_internal(klines, day_idx, current_trade):
-            current_trade.exit_date = klines[day_idx].trade_date
-            current_trade.exit_price = current_price
-            current_trade.exit_reason = "止损"
-            current_trade.pnl_pct = pnl_pct
-            return None, current_trade
-
-        # 白线死叉黄线（无条件清仓）
-        if self._check_dead_cross_exit(klines, day_idx):
-            current_trade.exit_date = klines[day_idx].trade_date
-            current_trade.exit_price = current_price
-            current_trade.exit_reason = "白线死叉黄线"
-            current_trade.pnl_pct = pnl_pct
-            return None, current_trade
-
-        # Step 6: 白线两日破位
-        if self._check_white_line_exit_internal(klines, day_idx):
-            current_trade.exit_date = klines[day_idx].trade_date
-            current_trade.exit_price = current_price
-            current_trade.exit_reason = "白线跌破"
-            current_trade.pnl_pct = pnl_pct
-            return None, current_trade
-
-        # Step 5: 卤煮止盈
-        if self._check_lu_zhu_internal(klines, day_idx):
-            if self.config.lu_half:
-                current_trade.partial_exits.append(
-                    {
-                        "date": klines[day_idx].trade_date,
-                        "price": current_price,
-                        "pnl_pct": pnl_pct,
-                        "type": "卤煮减半",
-                    }
-                )
-                current_trade.entry_reason += " [已卤煮减半]"
-            else:
-                current_trade.exit_date = klines[day_idx].trade_date
-                current_trade.exit_price = current_price
-                current_trade.exit_reason = "卤煮止盈"
-                current_trade.pnl_pct = pnl_pct
-                return None, current_trade
-
-        return current_trade, None
+        return self._apply_exit_checks(klines, day_idx, current_trade)
 
 
 # ============================================================

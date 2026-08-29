@@ -18,19 +18,19 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def run_zt(*args: str) -> subprocess.CompletedProcess:
+def run_zt(*args: str, timeout: int = 15) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "modules.cli", *args],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=timeout,
         cwd=str(PROJECT_ROOT),
     )
 
 
 # ==================== 顶层 subcommand ====================
 
-EXPECTED_TOP_COMMANDS = ["analyze", "screen", "score", "workflow", "diagnose", "watchlist", "sync"]
+EXPECTED_TOP_COMMANDS = ["analyze", "screen", "score", "workflow", "diagnose", "watchlist", "sync", "monitor"]
 
 
 def test_top_level_help_lists_all_seven_commands():
@@ -176,3 +176,67 @@ def test_zt_help_does_not_crash():
     # 应该看到 epilog 中的示例
     assert "zt analyze" in result.stdout
     assert "zt sync" in result.stdout
+
+
+# ==================== backtest / trade 子命令回归（P0-1 修复保护）====================
+#
+# 背景：2026-06 修复前，cli.py 注册 subparser 时 dest="bt_action"，
+# 但 cli_commands.cmd_backtest 里读 args.backtest_sub → 永远 None → 报"请指定子命令"。
+# trade 同问题。下面 4 个测试保证：
+# 1) help 能列出全部子命令
+# 2) 真正调用时不会卡在 dest 不匹配上（不会返回"请指定子命令"）
+# 注：完整业务行为依赖数据库，本测试不验证业务结果，只验证 dispatch 路径打通了
+
+
+BT_ACTIONS = ["shaofu", "multi", "portfolio"]
+
+
+@pytest.mark.parametrize("action", BT_ACTIONS)
+def test_backtest_help_lists_all_three_actions(action):
+    """zt backtest --help 必须列出 shaofu / multi / portfolio"""
+    result = run_zt("backtest", "--help")
+    assert result.returncode == 0
+    assert action in result.stdout, f"backtest --help 缺 {action}"
+
+
+def test_backtest_shaofu_dispatches_to_handler():
+    """回归：cli.py dest 必须为 backtest_sub,否则 cmd_backtest 报"请指定子命令"
+
+    不验证回测业务结果（依赖数据库），只验证不再卡在 dispatch 错误。
+    """
+    result = run_zt("backtest", "shaofu", "600487.SH", timeout=20)
+    # 真正成功需要数据库 + 数据；只要不是"请指定回测子命令"就说明 dest 修对了
+    assert "请指定回测子命令" not in (result.stdout + result.stderr), (
+        f"backtest shaofu 仍卡在 dest 错误:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_backtest_portfolio_dispatches_to_handler():
+    """回归：cli.py portfolio 子命令的位参数字段名必须为 codes（与 cmd_backtest 对齐）"""
+    result = run_zt("backtest", "portfolio", "600487.SH,601318.SH", timeout=20)
+    assert "请指定回测子命令" not in (result.stdout + result.stderr), (
+        f"backtest portfolio dest 不匹配:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # 且不应报"股票代码列表为空"（说明 codes 字段被 argparse 正确填充）
+    assert "股票代码列表为空" not in (result.stdout + result.stderr), (
+        f"backtest portfolio codes 字段没传过去:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+TRADE_ACTIONS = ["add", "list", "review", "stats"]
+
+
+@pytest.mark.parametrize("action", TRADE_ACTIONS)
+def test_trade_help_lists_all_four_actions(action):
+    """zt trade --help 必须列出 add / list / review / stats"""
+    result = run_zt("trade", "--help")
+    assert result.returncode == 0
+    assert action in result.stdout, f"trade --help 缺 {action}"
+
+
+def test_trade_list_dispatches_to_handler():
+    """回归：trade 从位参数改为 subparser 后,list 不应再卡在 dest 错误"""
+    result = run_zt("trade", "list", timeout=15)
+    assert "请指定交易子命令" not in (result.stdout + result.stderr), (
+        f"trade list dest 仍不匹配:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )

@@ -83,6 +83,78 @@ def _make_indicator_result(ts_code="600519.SH", trade_date="20260105"):
     )
 
 
+def _make_minimal_indicator_dict() -> dict:
+    """构造满足 _build_indicator_row 所需全部键的最小指标 dict。"""
+    return {
+        "close": 100.0,
+        "open": 99.0,
+        "high": 101.0,
+        "low": 98.0,
+        "vol": 10000.0,
+        "pct_chg": 1.0,
+        "k": 30.0,
+        "d": 25.0,
+        "j": 40.0,
+        "dif": 0.5,
+        "dea": 0.3,
+        "macd_hist": 0.4,
+        "bbi": 100.0,
+        "ma5": 99.0,
+        "ma10": 98.0,
+        "ma20": 97.0,
+        "ma60": 95.0,
+        "rsi6": 55.0,
+        "rsi12": 52.0,
+        "rsi24": 50.0,
+        "wr5": -30.0,
+        "wr10": -40.0,
+        "boll_mid": 100.0,
+        "boll_upper": 110.0,
+        "boll_lower": 90.0,
+        "boll_width": 20.0,
+        "boll_position": 50.0,
+        "vol_ratio": 1.2,
+        "zg_white": 0,
+        "dg_yellow": 0,
+        "gold_cross": False,
+        "dead_cross": False,
+        "rsl_short": 1.0,
+        "rsl_long": 1.0,
+        "is_needle": False,
+        "brick_value": 10.0,
+        "brick_trend": "RED",
+        "brick_count": 1,
+        "brick_trend_up": True,
+        "is_fanbao": False,
+        "is_beidou": False,
+        "is_suoliang": False,
+        "is_jiayin_zhenyang": False,
+        "is_jiayang_zhenyin": False,
+        "is_fangliang_yinxian": False,
+        "sell_score": 0,
+        "sell_reason": "",
+        "signal_desc": "B1",
+        "prev_high": 101.0,
+        "prev_low": 98.0,
+        "dmi_plus": 20.0,
+        "dmi_minus": 18.0,
+        "adx": 19.0,
+    }
+
+
+def test_build_indicator_row_includes_trade_date():
+    """_build_indicator_row 返回的行 tuple 应包含 ts_code、trade_date，且列数与 INSERT 列数一致。"""
+    from modules.data_sync import _build_indicator_row, _INDICATOR_INSERT_COLUMNS
+
+    ind = _make_minimal_indicator_dict()
+    row = _build_indicator_row("600519.SH", "20260101", ind)
+    assert isinstance(row, tuple)
+    assert row[0] == "600519.SH"
+    assert row[1] == "20260101"
+    expected_cols = [c.strip() for c in _INDICATOR_INSERT_COLUMNS.split(",") if c.strip()]
+    assert len(row) == len(expected_cols)
+
+
 class TestIndicatorCache:
     def setup_method(self):
         """每个测试方法前清理内存缓存"""

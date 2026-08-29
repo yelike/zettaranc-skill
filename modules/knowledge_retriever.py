@@ -6,10 +6,14 @@
 按意图自动注入分类过滤，提高检索精准度。
 """
 
+import json
+import logging
 from typing import Optional
 import os
 import httpx
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,7 +38,7 @@ class KnowledgeRetriever:
         "life": ["05_交易心理心态", "09_其他", "08_知识汇总体系", "02_直播笔记"],
     }
 
-    def __init__(self, kb_api_url: str | None = None, top_k: int = 5):
+    def __init__(self, kb_api_url: str | None = None, top_k: int = 5) -> None:
         if kb_api_url is None:
             kb_api_url = os.getenv("KB_API_URL", "http://localhost:8000")
         self.api_url = kb_api_url.rstrip("/")
@@ -61,7 +65,9 @@ class KnowledgeRetriever:
             )
             response.raise_for_status()
             data = response.json()
-        except Exception:
+        except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError, ValueError) as e:
+            # 窄化：仅捕获 HTTP / 超时 / JSON 解析异常，知识库为可选增强，回退为空列表
+            logger.warning("[knowledge_retriever] 知识库 API 调用失败 (intent=%s): %s", intent, e)
             return []
 
         results = data.get("documents", [])

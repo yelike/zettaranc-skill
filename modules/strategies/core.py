@@ -4,30 +4,28 @@ from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from modules.database import get_db_connection
 
+
+from ..datasource import dict_to_daily
 from ..indicators import DailyData
+
+# 向后兼容别名
+_dict_to_daily = dict_to_daily
 
 
 def _klines_dict_to_daily(klines: list[dict]) -> list[DailyData]:
     """将 strategies 模块用的 dict klines 转为 indicators 模块用的 DailyData"""
-    result = []
-    for i, k in enumerate(klines):
-        prev_close = klines[i - 1]["close"] if i > 0 else k["close"]
-        result.append(
-            DailyData(
-                ts_code=k["ts_code"],
-                trade_date=k["trade_date"],
-                open=k["open"],
-                high=k["high"],
-                low=k["low"],
-                close=k["close"],
-                vol=k["vol"],
-                amount=k.get("amount", k["close"] * k["vol"]),
-                pct_chg=k.get("pct_chg", 0),
-                prev_close=prev_close,
-            )
-        )
-    return result
+    return _dict_to_daily(klines)
+
+
+def _ensure_daily_klines(klines: list) -> list[DailyData]:
+    """确保输入序列是 list[DailyData]。若是 list[dict] 则自动转换。"""
+    if not klines:
+        return []
+    if isinstance(klines[0], DailyData):
+        return klines
+    return _dict_to_daily(klines)
 
 
 class StrategyType(Enum):
@@ -115,24 +113,6 @@ class StrategySignal:
     priority: Priority = Priority.OBSERVE
 
 
-def _resolve_db_path() -> Path:
-    """动态解析数据库路径"""
-    path_str = os.getenv("DB_PATH", "data/stock_data.db")
-    path = Path(path_str)
-    if not path.is_absolute():
-        path = (Path(__file__).parent.parent.parent / path_str).resolve()
-    return path
-
-
-def get_db_connection() -> sqlite3.Connection:
-    """获取数据库连接（动态读取 DB_PATH 环境变量）"""
-    db_path = _resolve_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def get_kline_data(ts_code: str, days: int = 120) -> list[dict]:
     """
     获取K线数据，并关联指标缓存与资金流数据
@@ -141,18 +121,24 @@ def get_kline_data(ts_code: str, days: int = 120) -> list[dict]:
     cursor = conn.cursor()
 
     # 联表查询：K线 + 指标缓存(Bollinger/RSI/DMI) + 资金流
+    # 注意：先按 DESC 取最近 N 条，再在 Python 端反转回正序
+    # （SQLite 在子查询里包一层即可避免 ORDER BY + LIMIT 顺序冲突）
     cursor.execute(
         """
         SELECT
             k.ts_code, k.trade_date, k.open, k.high, k.low, k.close, k.vol, k.amount, k.pct_chg,
             i.boll_upper, i.boll_mid, i.boll_lower, i.rsi6, i.adx, i.dmi_plus, i.dmi_minus,
             m.buy_lg_amount, m.buy_elg_amount, m.sell_lg_amount, m.sell_elg_amount, m.net_mf
-        FROM daily_kline k
+        FROM (
+            SELECT ts_code, trade_date, open, high, low, close, vol, amount, pct_chg
+            FROM daily_kline
+            WHERE ts_code = ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+        ) k
         LEFT JOIN indicator_cache i ON k.ts_code = i.ts_code AND k.trade_date = i.trade_date
         LEFT JOIN moneyflow m ON k.ts_code = m.ts_code AND k.trade_date = m.trade_date
-        WHERE k.ts_code = ?
         ORDER BY k.trade_date ASC
-        LIMIT ?
     """,
         (ts_code, days),
     )
@@ -201,37 +187,66 @@ def get_kline_data(ts_code: str, days: int = 120) -> list[dict]:
     return data_list
 
 
-def _dict_to_daily(klines: list[dict]) -> list[Any]:
-    """将 Dict K 线列表转换为 indicators.DailyData"""
-    from ..indicators import DailyData
-
-    return [
-        DailyData(
-            ts_code=k["ts_code"],
-            trade_date=k["trade_date"],
-            open=k["open"],
-            high=k["high"],
-            low=k["low"],
-            close=k["close"],
-            vol=k["vol"],
-            amount=k.get("amount", 0),
-            pct_chg=k.get("pct_chg", 0),
-        )
-        for k in klines
-    ]
-
-
 def _calc_kdj(klines: list[dict]) -> tuple[float, float, float]:
-    """通过 indicators.py 计算 KDJ"""
+    """计算 KDJ（委托到 indicators.calculate_kdj，支持 dict 输入）"""
     from ..indicators import calculate_kdj
 
-    daily = _dict_to_daily(klines)
-    return calculate_kdj(daily)
+    return calculate_kdj(klines)
 
 
 def _calc_bbi(klines: list[dict]) -> float:
-    """通过 indicators.py 计算 BBI"""
+    """计算 BBI（委托到 indicators.calculate_bbi，支持 dict 输入）"""
     from ..indicators import calculate_bbi
 
-    daily = _dict_to_daily(klines)
-    return calculate_bbi(daily)
+    return calculate_bbi(klines)
+
+
+def _get_kdj(klines: list[DailyData], index: int) -> tuple[float, float, float]:
+    """获取 KDJ，有属性直接读取，无属性则整段预计算一次并索引（只补未设过的属性）。
+
+    precompute_kdj_sequence[m] 与 calculate_kdj(klines[:m+1]) 逐位等值（已实证），
+    用整段预计算 + 索引替代每次前缀切片重算；用 is-None 守卫避免覆盖调用方手工设定的值。
+    """
+    today = klines[index]
+    if getattr(today, "kdj_j", None) is not None:
+        return today.kdj_k or 0.0, today.kdj_d or 0.0, today.kdj_j or 0.0
+    from ..indicators import precompute_kdj_sequence
+
+    kdj_sequence = precompute_kdj_sequence(klines)
+    if index >= len(kdj_sequence):
+        return 0.0, 0.0, 0.0
+    k, d, j = kdj_sequence[index]
+    for i, (kk, dd, jj) in enumerate(kdj_sequence):
+        if getattr(klines[i], "kdj_j", None) is None:
+            klines[i].kdj_k, klines[i].kdj_d, klines[i].kdj_j = kk, dd, jj
+    return k, d, j
+
+
+def _get_bbi(klines: list[DailyData], index: int) -> float:
+    """获取 BBI，有属性直接读取，无属性则整段预计算一次并索引（只补未设过的属性）。"""
+    today = klines[index]
+    if getattr(today, "bbi", None) is not None:
+        return today.bbi or 0.0
+    from ..indicators import precompute_bbi_sequence
+
+    bbi_sequence = precompute_bbi_sequence(klines)
+    if index >= len(bbi_sequence):
+        return 0.0
+    bbi = bbi_sequence[index]
+    for i, b in enumerate(bbi_sequence):
+        if getattr(klines[i], "bbi", None) is None:
+            klines[i].bbi = b
+    return bbi
+
+
+def _get_macd_dif(klines: list[DailyData], index: int) -> float:
+    """获取 MACD DIF，有属性直接读取，无属性则动态计算并缓存"""
+    today = klines[index]
+    if getattr(today, "macd_dif", None) is not None:
+        return today.macd_dif or 0.0
+    from ..indicators import calculate_macd
+
+    difs, _, _ = calculate_macd(klines[: index + 1])
+    for i in range(len(difs)):
+        klines[i].macd_dif = difs[i]
+    return today.macd_dif or 0.0

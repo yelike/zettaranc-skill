@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from .knowledge_retriever import KnowledgeRetriever, format_knowledge_cards
+from .constants import INTENT_DEFAULT_SCORE_THRESHOLD
 
 
 @dataclass
@@ -28,7 +29,7 @@ class RouterResult:
 class IntentRouter:
     """意图识别 + RAG 检索 + 系统提示组装 统一入口"""
 
-    def __init__(self, rules_path: str | None = None, kb_api_url: str | None = None, top_k: int = 5):
+    def __init__(self, rules_path: str | None = None, kb_api_url: str | None = None, top_k: int = 5) -> None:
         if rules_path is None:
             rules_path = str(Path(__file__).parent.parent / "rules" / "intent_rules.yaml")
 
@@ -119,7 +120,7 @@ class IntentRouter:
             else:
                 score = 0
 
-            if score > 0.05:  # 阈值
+            if score > INTENT_DEFAULT_SCORE_THRESHOLD:  # 阈值
                 scored.append((score, intent, priority, matched_kw))
 
         if not scored:

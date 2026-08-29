@@ -5,9 +5,14 @@
 
 from typing import Optional
 import os
+import logging
 from pathlib import Path
 
+from .core.errors import ErrorCode, ZettarancError
+
 # dotenv 加载已移至 modules/__init__.py（包级别一次性加载）
+
+logger = logging.getLogger(__name__)
 
 # 数据模式别名
 MODE_JNB = "jnb"  # JNB 模式：走 Tushare API
@@ -40,19 +45,21 @@ def get_mode_display_name(mode: str) -> str:
     return MODE_NAMES.get(mode, mode)
 
 
-def write_env_file(token: str | None = None, mode: str = MODE_NORMAL) -> str:
+def write_env_file(token: str | None = None, mode: str = MODE_NORMAL, env_path: Path | None = None) -> str:
     """
     写入 .env 文件
 
     Args:
         token: Tushare Token，普通小万模式下可为 None
         mode: 数据模式，"jnb" 或 "websearch"
+        env_path: 目标 .env 写入路径（可选，若未指定则写入默认位置）
 
     Returns:
         .env 文件的绝对路径
     """
-    env_path = Path(__file__).parent.parent / ".env"
-    get_mode_display_name(mode)
+    if env_path is None:
+        env_path = Path(__file__).parent.parent / ".env"
+
     lines = [
         "# 数据模式: jnb(JNB模式/走Tushare API) 或 websearch(普通小万模式/走网络搜索)",
         f"DATA_MODE={mode}",
@@ -99,12 +106,13 @@ def test_jnb_connection(token: str) -> bool:
     try:
         client = TushareClient(token=token)
         return client.check_connection()
-    except Exception as e:
+    except (ZettarancError, OSError, ConnectionError, TimeoutError, ValueError) as e:
+        logger.warning("[启动向导] JNB 连通性测试失败 (code=%s): %s", ErrorCode.DATA_SOURCE_ERROR.value, e)
         print(f"  连接测试失败: {e}")
         return False
 
 
-def run_wizard():
+def run_wizard() -> str | None:
     """
     运行启动向导（命令行模式，agent 对话中不直接使用）
 
@@ -122,6 +130,9 @@ def run_wizard():
     # 检查是否已配置
     if check_env_exists():
         mode = check_data_mode()
+        if mode is None:
+            print("[未配置] 环境变量缺失 DATA_MODE，请重新配置")
+            return None
         display = get_mode_display_name(mode)
         print(f"[已配置] 当前模式: {display}")
         print()
@@ -186,4 +197,5 @@ def run_wizard():
 
 if __name__ == "__main__":
     mode = run_wizard()
-    print(f"\n最终模式: {get_mode_display_name(mode)}")
+    if mode is not None:
+        print(f"\n最终模式: {get_mode_display_name(mode)}")

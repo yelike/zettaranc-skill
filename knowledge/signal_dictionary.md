@@ -8,6 +8,11 @@
 >
 > 对应输入数据字典 → `data_dictionary.md`
 
+<!-- Skill-Runtime
+加载时机: Agent 需要理解 analyze_stock() 返回的信号含义时
+用途: 见文件标题与目录
+大小: ~9KB
+-->
 ---
 
 ## 一、MACD 信号

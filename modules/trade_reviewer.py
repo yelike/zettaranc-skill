@@ -4,12 +4,16 @@
 """
 
 from typing import Optional
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 
 from .database import save_trade_record, get_trade_records
 from .indicators import analyze_stock
 from .trade_parser import TradeParser, ParseResult
+from .core.errors import ErrorCode, ZettarancError
+
+logger = logging.getLogger(__name__)
 
 # 黑话词典（LLM 生成点评时可用）
 JARGON_DICT = {
@@ -160,7 +164,7 @@ class ReviewContext:
 class TradeReviewer:
     """交割单 - 数据准备层"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.parser = TradeParser()
 
     def parse_input(self, text: str) -> tuple[ParseResult, dict | None]:
@@ -203,7 +207,10 @@ class TradeReviewer:
         return ctx
 
     def enrich_with_indicators(self, ctx: ReviewContext, days: int = 60) -> ReviewContext:
-        """补充当时的技术指标数据"""
+        """补充当时的技术指标数据
+
+        指标获取为可选：失败时记录日志，跳过指标补充，调用方可继续走无指标路径。
+        """
         try:
             result = analyze_stock(ctx.ts_code, days=days)
             if result:
@@ -216,8 +223,13 @@ class TradeReviewer:
                     "sell_score": getattr(result, "sell_score", None),
                     "pct_chg": getattr(result, "pct_chg", None),
                 }
-        except Exception as e:
-            print(f"获取指标失败: {e}")
+        except (ZettarancError, ValueError, KeyError, AttributeError) as e:
+            logger.warning(
+                "[trade_reviewer] 获取指标失败 (code=%s, ts_code=%s): %s",
+                ErrorCode.TRADE_REVIEW_FAILED.value,
+                ctx.ts_code,
+                e,
+            )
 
         return ctx
 
@@ -243,7 +255,9 @@ class TradeReviewer:
                     d1 = datetime.strptime(first_buy["trade_date"], "%Y-%m-%d")
                     d2 = datetime.strptime(ctx.trade_date, "%Y-%m-%d")
                     ctx.holding_days = (d2 - d1).days
-                except Exception:
+                except (ValueError, TypeError) as e:
+                    # 日期格式异常：放弃持仓天数计算（非关键字段）
+                    logger.debug("[trade_reviewer] 日期解析失败，跳过 holding_days: %s", e)
                     pass
 
             ctx.matched_buy = {"price": ctx.avg_cost, "date": first_buy.get("trade_date"), "quantity": total_qty}

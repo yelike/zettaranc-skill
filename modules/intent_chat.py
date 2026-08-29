@@ -9,6 +9,7 @@
 
 import os
 import sys
+import logging
 
 # 清除代理
 for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
@@ -16,6 +17,9 @@ for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
 os.environ["no_proxy"] = "localhost,127.0.0.1"
 
 from .intent_router import IntentRouter  # noqa: E402
+from typing import Any  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # 意图显示名称
 INTENT_LABELS = {
@@ -27,7 +31,7 @@ INTENT_LABELS = {
 }
 
 
-def get_llm():
+def get_llm() -> Any | None:
     """获取 LLM 实例
 
     如果未配置 LLM_API_KEY，返回 None，不影响主流程。
@@ -44,8 +48,9 @@ def get_llm():
             base_url=os.getenv("LLM_BASE_URL"),
             model=os.getenv("LLM_MODEL"),
         )
-    except Exception as e:
-        print(f"[警告] LLM 初始化失败: {e}")
+    except (ImportError, AttributeError, TypeError, ValueError) as e:
+        # LLM 可选；未配置 / Provider 不可用时降级为 None
+        logger.warning("[意图聊天] LLM 初始化失败，降级为无 LLM 模式: %s", e)
         return None
 
 
@@ -56,7 +61,7 @@ def generate_reply(llm, system_prompt: str, user_message: str) -> str:
     return llm.generate(system_prompt, user_message)
 
 
-def chat_once(router: IntentRouter, message: str, llm=None):
+def chat_once(router: IntentRouter, message: str, llm=None) -> None:
     """单次意图识别 + RAG + LLM 查询"""
     result = router.process(message)
 
@@ -103,7 +108,7 @@ def chat_once(router: IntentRouter, message: str, llm=None):
     print(f"{'=' * 60}\n")
 
 
-def chat_interactive(router: IntentRouter, llm):
+def chat_interactive(router: IntentRouter, llm) -> None:
     """交互模式"""
     print("\n" + "=" * 60)
     print("Z哥意图识别聊天")
@@ -131,7 +136,8 @@ def chat_interactive(router: IntentRouter, llm):
         chat_once(router, message, llm)
 
 
-def main():
+def main() -> None:
+    """CLI 入口：意图识别对话 demo。"""
     router = IntentRouter()
     llm = get_llm()
 

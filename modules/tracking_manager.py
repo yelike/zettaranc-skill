@@ -5,28 +5,30 @@
 管理跟踪股票的添加、移除、查询、状态更新
 """
 
-import os
-import sys
-from pathlib import Path
+import logging
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, Any
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+from modules.database import get_connection
 
-from modules.database import get_connection  # noqa: E402
+logger = logging.getLogger(__name__)
 
 
 class TrackingManager:
     """跟踪池管理器"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化跟踪池管理器"""
         pass
 
     def add_stock(
-        self, ts_code: str, name: str = None, reason: str = None, strategy_tags: list[str] = None, notes: str = None
+        self,
+        ts_code: str,
+        name: str | None = None,
+        reason: str | None = None,
+        strategy_tags: list[str] | None = None,
+        notes: str | None = None,
     ) -> bool:
         """
         添加股票到跟踪池
@@ -75,11 +77,11 @@ class TrackingManager:
                 print(f"已添加 {ts_code} 到跟踪池")
                 return True
 
-        except Exception as e:
-            print(f"添加股票失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("添加股票 %s 失败: %s", ts_code, e)
             return False
 
-    def remove_stock(self, ts_code: str, reason: str = None) -> bool:
+    def remove_stock(self, ts_code: str, reason: str | None = None) -> bool:
         """
         从跟踪池移除股票
 
@@ -116,11 +118,11 @@ class TrackingManager:
                 print(f"已从跟踪池移除 {ts_code}")
                 return True
 
-        except Exception as e:
-            print(f"移除股票失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("移除股票 %s 失败: %s", ts_code, e)
             return False
 
-    def list_stocks(self, status: str = "active", strategy_tag: str = None) -> list[dict[str, Any]]:
+    def list_stocks(self, status: str = "active", strategy_tag: str | None = None) -> list[dict[str, Any]]:
         """
         列出跟踪池中的股票
 
@@ -151,8 +153,8 @@ class TrackingManager:
                 cursor.execute(sql, params)
                 return [dict(row) for row in cursor.fetchall()]
 
-        except Exception as e:
-            print(f"查询跟踪池失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("查询跟踪池失败: %s", e)
             return []
 
     def get_stock_info(self, ts_code: str) -> dict[str, Any] | None:
@@ -182,11 +184,11 @@ class TrackingManager:
                 row = cursor.fetchone()
                 return dict(row) if row else None
 
-        except Exception as e:
-            print(f"查询股票信息失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("查询股票信息 %s 失败: %s", ts_code, e)
             return None
 
-    def update_stock_status(self, ts_code: str, status: str, notes: str = None) -> bool:
+    def update_stock_status(self, ts_code: str, status: str, notes: str | None = None) -> bool:
         """
         更新股票状态
 
@@ -225,8 +227,8 @@ class TrackingManager:
                 print(f"已更新 {ts_code} 状态为 {status}")
                 return True
 
-        except Exception as e:
-            print(f"更新股票状态失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("更新股票状态 %s 失败: %s", ts_code, e)
             return False
 
     def get_tracking_stats(self) -> dict[str, Any]:
@@ -267,8 +269,8 @@ class TrackingManager:
 
                 return stats
 
-        except Exception as e:
-            print(f"获取统计信息失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("获取统计信息失败: %s", e)
             return {}
 
     def get_strategy_distribution(self) -> dict[str, int]:
@@ -288,7 +290,7 @@ class TrackingManager:
                     WHERE status = 'active' AND strategy_tags IS NOT NULL
                 """)
 
-                distribution = {}
+                distribution: dict[str, int] = {}
                 for row in cursor.fetchall():
                     tags = row["strategy_tags"].split(",")
                     for tag in tags:
@@ -298,12 +300,12 @@ class TrackingManager:
 
                 return distribution
 
-        except Exception as e:
-            print(f"获取策略分布失败: {e}")
+        except (sqlite3.Error, ValueError, KeyError) as e:
+            logger.warning("获取策略分布失败: %s", e)
             return {}
 
 
-def main():
+def main() -> None:
     """测试函数"""
     manager = TrackingManager()
 

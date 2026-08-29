@@ -25,11 +25,22 @@ def mock_env_for_tests():
             "DB_PATH": db_path,
             "DATA_DIR": tmpdir,
         }
-        # 清除可能影响测试的已有变量
+        # 清除可能影响测试的已有变量（含开发者本地 .env 注入的数据源 Key，保证用例封闭）
         for key in list(os.environ.keys()):
-            if key in ("DATA_MODE", "DB_PATH", "DATA_DIR", "TUSHARE_TOKEN"):
+            if key in (
+                "DATA_MODE",
+                "DB_PATH",
+                "DATA_DIR",
+                "TUSHARE_TOKEN",
+                "HITHINK_FINANCE_API_KEY",
+                "HITHINK_FINANCE_API_URL",
+            ):
                 del os.environ[key]
         os.environ.update(env_vars)
+        # 每次测试清空 bridge 健康缓存，隔离 patch _http_get 的 auto 测试（不触发 set_bridge_config）
+        from modules import bridge_client
+
+        bridge_client.reset_bridge_health_cache()
         yield db_path
 
 
@@ -261,3 +272,68 @@ def write_stock_basic(db_conn, ts_code="600519.SH", name="贵州茅台", industr
         (ts_code, name, "贵州", industry, market, "20010801", "SH"),
     )
     db_conn.commit()
+
+
+@pytest.fixture
+def state_with_interrupted_run(tmp_path):
+    """上次 run 到 round 2 中断, 验证下次 run 询问恢复."""
+    import json
+
+    state_file = tmp_path / "self_optimizer_state.json"
+    state = {
+        "run_id": "2026-06-10-abcd",
+        "started_at": "2026-06-10T07:30:00",
+        "target": "trading",
+        "mode": "dry_run",
+        "current_round": 2,
+        "baseline_score": 80.0,
+        "rounds": [
+            {"round": 1, "old": 80.0, "new": 82.5, "delta": 2.5, "status": "keep"},
+        ],
+    }
+    state_file.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    yield state_file
+
+
+@pytest.fixture
+def mock_monthly_reviews_with_poor_strategy():
+    """mock 3 个月复盘数据, 一只策略 stock_count=1 胜率 -30%."""
+    from datetime import datetime, timedelta
+
+    from modules.database import get_connection
+
+    months = []
+    base = datetime(2026, 3, 1)
+    for i in range(3):
+        month = (base + timedelta(days=30 * i)).strftime("%Y%m")
+        months.append(month)
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # 确保表存在 (init_database 不加载 tracking_tables.sql)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS monthly_reviews_self (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_month TEXT NOT NULL,
+                ts_code TEXT NOT NULL,
+                monthly_return REAL,
+                max_drawdown REAL,
+                buy_signals_count INTEGER,
+                correct_buy_signals INTEGER,
+                UNIQUE(ts_code, review_month)
+            )
+            """
+        )
+        for month in months:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO monthly_reviews_self
+                (ts_code, review_month, monthly_return, max_drawdown,
+                 buy_signals_count, correct_buy_signals)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("600000.SH", month, -30.0, 45.0, 5, 1),
+            )
+        conn.commit()
+    yield months

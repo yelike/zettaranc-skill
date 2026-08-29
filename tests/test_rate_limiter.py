@@ -11,6 +11,8 @@ import multiprocessing
 import time
 from pathlib import Path
 
+from modules.data_sync.rate_limiter import _RateLimiter
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -19,30 +21,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_rate_limiter_class_exists():
-    """modules.data_sync 必须有 _RateLimiter 类"""
-    from modules.data_sync import _RateLimiter
-
+    """modules.data_sync.rate_limiter 必须有 _RateLimiter 类"""
     assert _RateLimiter is not None
 
 
 def test_rate_limiter_module_level_singleton_exists():
     """模块级 _GLOBAL_LIMITER 单例必须存在"""
-    from modules.data_sync import _GLOBAL_LIMITER
+    from modules.data_sync.rate_limiter import _GLOBAL_LIMITER
 
     assert _GLOBAL_LIMITER is not None
 
 
 def test_rate_limit_global_function_exists():
     """模块级 _rate_limit_global() 公开函数必须存在"""
-    from modules.data_sync import _rate_limit_global
+    from modules.data_sync.rate_limiter import _rate_limit_global
 
     assert callable(_rate_limit_global)
+
+
+def test_rate_limiter_available_via_data_sync_shim():
+    """向后兼容：从 modules.data_sync shim 导入仍可用"""
+    from modules.data_sync import _RateLimiter, _GLOBAL_LIMITER, _rate_limit_global, DataSyncer
+
+    assert _RateLimiter is not None
+    assert _GLOBAL_LIMITER is not None
+    assert callable(_rate_limit_global)
+    assert DataSyncer is not None
 
 
 def test_data_syncer_uses_global_limiter():
     """DataSyncer._rate_limit() 必须调模块级 _GLOBAL_LIMITER.wait()"""
     import inspect
-    from modules.data_sync import DataSyncer
+    from modules.data_sync.syncer import DataSyncer
 
     src = inspect.getsource(DataSyncer._rate_limit)
     assert "_rate_limit_global" in src
@@ -54,24 +64,18 @@ def test_data_syncer_uses_global_limiter():
 
 def test_rate_limiter_init_default_180():
     """_RateLimiter() 默认 max_per_min=180（留 20 缓冲应对 200 上限）"""
-    from modules.data_sync import _RateLimiter
-
     rl = _RateLimiter()
     assert rl._max == 180
 
 
 def test_rate_limiter_init_respects_max_per_min():
     """_RateLimiter(max_per_min=N) 必须接受 N 参数"""
-    from modules.data_sync import _RateLimiter
-
     rl = _RateLimiter(max_per_min=50)
     assert rl._max == 50
 
 
 def test_rate_limiter_wait_does_not_block_under_limit():
     """未到上限时 wait() 应该立即返回"""
-    from modules.data_sync import _RateLimiter
-
     rl = _RateLimiter(max_per_min=1000)  # 高上限，避免触发限流
     start = time.monotonic()
     for _ in range(10):
@@ -80,26 +84,25 @@ def test_rate_limiter_wait_does_not_block_under_limit():
     assert elapsed < 0.5, f"10 次 wait() 耗时 {elapsed:.2f}s 异常长"
 
 
-def test_rate_limiter_blocks_when_over_limit():
-    """超过上限时 wait() 必须阻塞（至少等到下一个 60s 窗口有空位）"""
-    from modules.data_sync import _RateLimiter
-
+def test_rate_limiter_blocks_when_over_limit(monkeypatch):
+    """超过上限时 wait() 必须调用 sleep 来阻塞（不实际等待 60s）"""
     rl = _RateLimiter(max_per_min=3)  # 低上限
     # 先快速吃满 3 个 token
     for _ in range(3):
         rl.wait()
-    # 第 4 次必须阻塞
-    start = time.monotonic()
+
+    # 拦截真实 sleep，记录调用时长
+    slept_seconds: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept_seconds.append)
+
+    # 第 4 次必须触发阻塞
     rl.wait()
-    elapsed = time.monotonic() - start
-    # 不需要等 60s，只要不是瞬时（>0.01s）就算阻塞
-    assert elapsed > 0.01, f"wait() 第 4 次未阻塞（elapsed={elapsed:.4f}s）"
+    assert slept_seconds, "wait() 超过上限时未调用 sleep 阻塞"
+    assert slept_seconds[0] > 0, f"sleep 时长异常：{slept_seconds[0]}"
 
 
 def test_rate_limiter_current_count_tracks_window():
     """current_count 必须反映当前 60s 窗口内的请求数"""
-    from modules.data_sync import _RateLimiter
-
     rl = _RateLimiter(max_per_min=100)
     assert rl.current_count == 0
     for _ in range(5):
@@ -112,8 +115,6 @@ def test_rate_limiter_current_count_tracks_window():
 
 def _child_wait_n_times(n: int, max_per_min: int) -> int:
     """子进程函数：调 _RateLimiter.wait() n 次，返回最终 current_count"""
-    from modules.data_sync import _RateLimiter
-
     rl = _RateLimiter(max_per_min=max_per_min)
     for _ in range(n):
         rl.wait()
@@ -192,8 +193,8 @@ def test_global_limiter_reads_tushare_rpm_env(monkeypatch):
     # 模块级 _GLOBAL_LIMITER 在 import 时已确定 max_per_min
     # 验证模块级代码确实读了 TUSHARE_RPM（静态检查）
     import inspect
-    from modules import data_sync
+    from modules.data_sync import rate_limiter
 
-    src = inspect.getsource(data_sync)
+    src = inspect.getsource(rate_limiter)
     assert "TUSHARE_RPM" in src
     assert "os.environ.get" in src
